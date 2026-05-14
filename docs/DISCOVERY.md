@@ -152,6 +152,12 @@ ipnd_config=/home/pi05/dtn/dtn-discovery/ipnd.rc
 
 # Enable debug logging
 debug=false
+
+# Fast recovery: re-inject nodes seen within this many days after ION restart
+node_staleness_days=7
+
+# Prune nodes not seen within this many days from the database
+node_prune_days=30
 ```
 
 ### Adapting for your node
@@ -301,12 +307,35 @@ Written by the local dtnex instance. Lists nodes that have exchanged metadata wi
 268485111 echo-dhulikhel,anamol@ekrasunya.com,27.619200,85.538100
 ```
 
+## Fast Recovery After ION Restart
+
+When ION restarts, all contacts, ranges, and plans are wiped from shared memory. Without intervention, the node has no routes until dtnex re-exchanges metadata (up to 30 minutes) and the discovery daemon completes a scan cycle (up to 5 minutes).
+
+The discovery daemon now implements **fast recovery**: on startup, it compares ION's current contact count with the cached node database. If ION has significantly fewer contacts, it re-injects cached nodes immediately:
+
+- **Direct neighbors** (with cached outduct addresses): Full re-injection including contacts, ranges, outducts, and plans
+- **Gateway-routable nodes**: Re-injection of contacts and ranges (CGR routes through existing gateway plan)
+- **Stale nodes** (not seen in `node_staleness_days` days): Skipped
+
+This reduces post-restart recovery from 5-30 minutes to under 10 seconds.
+
+### Staleness and Pruning
+
+| Threshold | Default | Action |
+|-----------|---------|--------|
+| `node_staleness_days` | 7 | Nodes not seen within this period are NOT re-injected after restart |
+| `node_prune_days` | 30 | Nodes not seen within this period are REMOVED from the database |
+
+### Outduct Caching
+
+During each scan, the discovery daemon reads ION's forwarding plans (`ipnadmin l plan`) and stores the outduct address (e.g., `100.96.108.37:4556`) for each node in `discovered_nodes.json`. This enables plan reconstruction after restart.
+
 ## Limitations
 
 - **IPND** only discovers nodes on the same IP subnet (broadcast/multicast range). It cannot discover nodes across the internet.
 - **openipn.org scraping** depends on the gateway being online and the openipn.org website being available.
 - **Auto-addition** only works for nodes that have a direct edge to the gateway in the contact graph. Nodes behind other relays (multi-hop, no gateway edge) are discovered but not auto-added.
-- The daemon does not remove stale contacts. Contacts added via `ionadmin` persist until ION is restarted or they expire based on their duration.
+- Stale nodes are now pruned after `node_prune_days` (default 30 days).
 
 ## Troubleshooting
 

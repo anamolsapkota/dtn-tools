@@ -73,8 +73,8 @@ dtn send 268485000 "Hello from my DTN node"
 | `dtn neighbors remove <IPN>` | Remove a neighbor (persists to running ION + host.rc) |
 | `dtn neighbors ping [IPN]` | Ping one or all neighbors |
 | `dtn discover` | List nodes found by the discovery daemon |
-| `dtn chat [IPN]` | Interactive terminal chat over DTN bundles |
-| `dtn chat <IPN> "message"` | Send a one-shot chat message |
+| `dtn chat [IPN]` | Interactive chat with per-sender conversations, unread indicators, history |
+| `dtn chat <IPN> "message"` | Send a one-shot chat message (saved to history) |
 | `dtn send <IPN> "message"` | Send a raw DTN bundle |
 | `dtn sensor` | Send BME280 sensor data to IPNSIG Bundle Board |
 | `dtn trace <IPN>` | Trace the bundle route and identify issues |
@@ -238,8 +238,9 @@ dtn-tools/
 ├── dtn                      # Main CLI entry point (~800 lines)
 ├── dtn_tools/
 │   ├── init.py              # Complete node setup wizard
+│   ├── chat.py              # Persistent chat with per-sender conversations
 │   ├── traceroute.py        # Route tracing and diagnostics
-│   ├── discovery.py         # Neighbor discovery daemon
+│   ├── discovery.py         # Neighbor discovery daemon (with fast recovery)
 │   └── dtn_nodes_cli.py     # Node listing utilities
 ├── docs/
 │   ├── ARCHITECTURE.md      # Detailed architecture documentation
