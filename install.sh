@@ -29,26 +29,21 @@ if ! python3 -c "import requests" 2>/dev/null; then
     }
 fi
 
-# Create installation directory
-sudo mkdir -p "$INSTALL_DIR"
+# Get absolute path to repo
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Copy main CLI
-sudo cp dtn "$BIN_DIR/dtn"
-sudo chmod +x "$BIN_DIR/dtn"
+# Make CLI executable
+chmod +x "$REPO_DIR/dtn"
 
-# Copy Python modules
-sudo cp -r dtn_tools/ "$INSTALL_DIR/"
-
-# Copy examples
-sudo mkdir -p "$INSTALL_DIR/examples"
-if [ -d examples ]; then
-    sudo cp -r examples/ "$INSTALL_DIR/"
-fi
+# Symlink CLI to PATH (git pull will update it automatically)
+sudo ln -sf "$REPO_DIR/dtn" "$BIN_DIR/dtn"
 
 echo ""
 echo "Installed:"
-echo "  CLI:     $BIN_DIR/dtn"
-echo "  Modules: $INSTALL_DIR/"
+echo "  CLI:     $BIN_DIR/dtn -> $REPO_DIR/dtn"
+echo "  Modules: $REPO_DIR/dtn_tools/"
+echo ""
+echo "To update: cd $REPO_DIR && git pull"
 echo ""
 echo "Usage:"
 echo "  dtn init          # Setup a new DTN node"
