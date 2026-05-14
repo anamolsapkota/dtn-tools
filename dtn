@@ -574,24 +574,40 @@ def cmd_chat(args):
         return
 
     def list_nodes():
-        """Show available nodes to chat with."""
-        # Neighbors (direct plans)
-        out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
-        neighbors = []
+        """Show all reachable nodes from the contact graph."""
+        # Get all unique IPNs from contact graph
+        out, _, _ = run("echo 'l contact' | ionadmin 2>/dev/null")
+        all_ipns = set()
         for l in out.splitlines():
-            l = l.strip().lstrip(":").strip()
-            m = re.match(r"(\d+)\s+xmit\s+(\S+)", l)
-            if m and m.group(1) != MY_IPN:
-                neighbors.append((m.group(1), m.group(2)))
+            m = re.search(r"node\s+(\d+)\s+to\s+node\s+(\d+)", l)
+            if m:
+                all_ipns.add(m.group(1))
+                all_ipns.add(m.group(2))
+        all_ipns.discard(MY_IPN)
 
-        if neighbors:
+        # Get plans to mark direct neighbors
+        plan_out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+        plans = set()
+        for l in plan_out.splitlines():
+            l = l.strip().lstrip(":").strip()
+            m = re.match(r"(\d+)\s+xmit", l)
+            if m and m.group(1) != MY_IPN:
+                plans.add(m.group(1))
+
+        nodes = sorted(all_ipns, key=lambda x: int(x))
+
+        if nodes:
             print()
-            print("  Available nodes:")
-            for i, (ipn, ip) in enumerate(neighbors, 1):
-                print(f"    {i}. {node_label(ipn)}  [{ip}]")
+            print(f"  Available nodes ({len(nodes)}):")
+            for i, ipn in enumerate(nodes, 1):
+                tag = " *" if ipn in plans else ""
+                print(f"    {i:>3}. {node_label(ipn)}{tag}")
             print()
+            print("  * = direct neighbor.  All others routed via contact graph.")
             print("  Type a number to select, or enter an IPN directly.")
-        return neighbors
+        else:
+            print("  No nodes found. Is ION running?")
+        return nodes
 
     # Interactive mode
     print("=" * 60)
@@ -615,9 +631,9 @@ def cmd_chat(args):
             choice = choice.replace("ipn:", "")
             # Try as number (index into list)
             if choice.isdigit() and 1 <= int(choice) <= len(neighbors):
-                dest_ipn_target = neighbors[int(choice) - 1][0]
+                dest_ipn_target = neighbors[int(choice) - 1]
                 break
-            # Try as IPN
+            # Try as IPN directly
             if choice.isdigit() and len(choice) >= 6:
                 dest_ipn_target = choice
                 break
@@ -625,7 +641,7 @@ def cmd_chat(args):
 
     print()
     print(f"  Chatting with: {node_label(dest_ipn_target)}")
-    print(f"  Type messages and press Enter. Commands: to, nodes, quit")
+    print(f"  Type messages and press Enter. Ctrl+C or 'quit' to exit.")
     print("-" * 60)
 
     # Start receiver
@@ -650,7 +666,7 @@ def cmd_chat(args):
                 val = cmd[3:].strip().replace("ipn:", "")
                 # Support number selection
                 if val.isdigit() and 1 <= int(val) <= len(neighbors):
-                    dest_ipn_target = neighbors[int(val) - 1][0]
+                    dest_ipn_target = neighbors[int(val) - 1]
                 else:
                     dest_ipn_target = val
                 print(f"  Now chatting with: {node_label(dest_ipn_target)}")
