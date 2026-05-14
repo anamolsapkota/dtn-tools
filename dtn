@@ -573,19 +573,60 @@ def cmd_chat(args):
             print("  Failed.")
         return
 
+    def list_nodes():
+        """Show available nodes to chat with."""
+        # Neighbors (direct plans)
+        out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+        neighbors = []
+        for l in out.splitlines():
+            l = l.strip().lstrip(":").strip()
+            m = re.match(r"(\d+)\s+xmit\s+(\S+)", l)
+            if m and m.group(1) != MY_IPN:
+                neighbors.append((m.group(1), m.group(2)))
+
+        if neighbors:
+            print()
+            print("  Available nodes:")
+            for i, (ipn, ip) in enumerate(neighbors, 1):
+                print(f"    {i}. {node_label(ipn)}  [{ip}]")
+            print()
+            print("  Type a number to select, or enter an IPN directly.")
+        return neighbors
+
     # Interactive mode
     print("=" * 60)
     print("  DTN Terminal Chat")
     print(f"  Your node: {node_label(MY_IPN)}")
     print(f"  Listening on: {recv_eid}")
-    if dest_ipn_target:
-        print(f"  Chatting with: {node_label(dest_ipn_target)}")
-    print("  Type a message and press Enter to send.")
-    print("  Commands: /to <IPN> — switch recipient")
-    print("            /nodes   — list known nodes")
-    print("            /quit    — exit")
     print("=" * 60)
+
+    # Show nodes and let user pick if no dest set
+    neighbors = list_nodes()
+
+    if not dest_ipn_target:
+        while True:
+            try:
+                choice = input("\n  Select node to chat with: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Cancelled.")
+                return
+            if not choice:
+                continue
+            choice = choice.replace("ipn:", "")
+            # Try as number (index into list)
+            if choice.isdigit() and 1 <= int(choice) <= len(neighbors):
+                dest_ipn_target = neighbors[int(choice) - 1][0]
+                break
+            # Try as IPN
+            if choice.isdigit() and len(choice) >= 6:
+                dest_ipn_target = choice
+                break
+            print("  Invalid selection. Enter a number or IPN.")
+
     print()
+    print(f"  Chatting with: {node_label(dest_ipn_target)}")
+    print(f"  Type messages and press Enter. Commands: to, nodes, quit")
+    print("-" * 60)
 
     # Start receiver
     recv_thread = threading.Thread(target=receiver_thread, daemon=True)
@@ -594,40 +635,38 @@ def cmd_chat(args):
     try:
         while True:
             try:
-                if dest_ipn_target:
-                    line = input(f"  you> ").strip()
-                else:
-                    line = input(f"  [{MY_IPN}]> ").strip()
+                line = input(f"  you> ").strip()
             except EOFError:
                 break
 
             if not line:
                 continue
-            if line == "/quit" or line == "/exit" or line == "/q":
+
+            # Commands — with or without / prefix
+            cmd = line.lstrip("/").lower()
+            if cmd in ("quit", "exit", "q"):
                 break
-            elif line.startswith("/to "):
-                dest_ipn_target = line[4:].strip().replace("ipn:", "")
+            elif cmd.startswith("to "):
+                val = cmd[3:].strip().replace("ipn:", "")
+                # Support number selection
+                if val.isdigit() and 1 <= int(val) <= len(neighbors):
+                    dest_ipn_target = neighbors[int(val) - 1][0]
+                else:
+                    dest_ipn_target = val
                 print(f"  Now chatting with: {node_label(dest_ipn_target)}")
                 continue
-            elif line == "/nodes":
-                # Quick node list
-                out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
-                for l in out.splitlines():
-                    l = l.strip().lstrip(":").strip()
-                    m = re.match(r"(\d+)\s+xmit\s+(\S+)", l)
-                    if m and m.group(1) != MY_IPN:
-                        print(f"    {node_label(m.group(1))} ({m.group(2)})")
+            elif cmd == "nodes":
+                neighbors = list_nodes()
+                continue
+            elif cmd == "help":
+                print("  Commands: to <IPN|#>  nodes  quit  help")
                 continue
             elif line.startswith("/"):
-                print("  Unknown command. Try /to, /nodes, /quit")
-                continue
-
-            if not dest_ipn_target:
-                print("  No recipient set. Use: /to <IPN>")
+                print("  Unknown command. Try: to, nodes, quit, help")
                 continue
 
             if send_bundle(dest_ipn_target, line):
-                pass  # message sent silently
+                pass  # sent
             else:
                 print("  [send failed]")
 
@@ -636,7 +675,6 @@ def cmd_chat(args):
     finally:
         running = False
         print("\n  Chat ended.")
-        # Cleanup
         import shutil as _shutil
         _shutil.rmtree(recv_dir, ignore_errors=True)
 
