@@ -13,6 +13,8 @@ Usage:
     dtn discover search <query>     Search discovered nodes
     dtn send <IPN> <message>        Send a DTN bundle message
     dtn send all <message>          Send to all neighbors
+    dtn chat [IPN]                  Interactive terminal chat over DTN
+    dtn chat <IPN> <message>        Send a chat message (one-shot)
     dtn contacts                    List ION contacts
     dtn nodes                       List all unique nodes in the contact graph
     dtn plans                       List ION plans
@@ -467,6 +469,178 @@ def cmd_send(args):
             print(f"Failed: {err}")
 
 
+def cmd_chat(args):
+    """Interactive terminal chat over DTN bundles."""
+    import threading
+    import time
+    import tempfile
+    import signal
+
+    detect_ipn()
+    CHAT_SVC = "8"  # service number for terminal chat
+    recv_dir = tempfile.mkdtemp(prefix="dtn-chat-")
+    recv_eid = f"ipn:{MY_IPN}.{CHAT_SVC}"
+    running = True
+
+    # Load discovery DB for node names
+    node_names = {}
+    if os.path.exists(DISCOVERY_DB):
+        try:
+            import json
+            with open(DISCOVERY_DB) as f:
+                for ipn, info in json.load(f).get("nodes", {}).items():
+                    if info.get("name"):
+                        node_names[ipn] = info["name"]
+        except Exception:
+            pass
+
+    def node_label(ipn):
+        name = node_names.get(ipn, "")
+        return f"{name} (ipn:{ipn})" if name else f"ipn:{ipn}"
+
+    def send_bundle(dest_ipn, msg):
+        """Send a chat message as a DTN bundle."""
+        import json as _json
+        dest = f"ipn:{dest_ipn}.{CHAT_SVC}"
+        payload = _json.dumps({
+            "from": MY_IPN,
+            "name": os.environ.get("USER", "unknown"),
+            "msg": msg,
+            "ts": time.strftime("%H:%M:%S"),
+        })
+        _, _, rc = run(f"bpsource {dest} '{payload}' 2>/dev/null")
+        return rc == 0
+
+    def receiver_thread():
+        """Background thread: run bprecvfile and poll for incoming messages."""
+        import json as _json
+        # Start bprecvfile
+        proc = subprocess.Popen(
+            ["bprecvfile", recv_eid, "1"],
+            cwd=recv_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        file_counter = 0
+        while running:
+            time.sleep(0.5)
+            # Poll for new files
+            try:
+                for fname in sorted(os.listdir(recv_dir)):
+                    fpath = os.path.join(recv_dir, fname)
+                    if not os.path.isfile(fpath):
+                        continue
+                    try:
+                        with open(fpath) as f:
+                            content = f.read().strip()
+                        os.unlink(fpath)
+                        if not content:
+                            continue
+
+                        # Try to parse as JSON chat message
+                        try:
+                            data = _json.loads(content)
+                            sender = data.get("from", "?")
+                            name = data.get("name", "")
+                            msg = data.get("msg", content)
+                            ts = data.get("ts", "")
+                            label = name or node_label(sender)
+                            print(f"\r  [{ts}] {label}: {msg}")
+                        except _json.JSONDecodeError:
+                            # Plain text bundle
+                            print(f"\r  [bundle] {content}")
+                        # Reprint prompt
+                        if dest_ipn_target:
+                            print(f"  you> ", end="", flush=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        proc.terminate()
+
+    # Parse mode
+    dest_ipn_target = None
+    if hasattr(args, "dest") and args.dest:
+        dest_ipn_target = args.dest.replace("ipn:", "")
+
+    if dest_ipn_target and hasattr(args, "message") and args.message:
+        # One-shot mode: dtn chat <IPN> "message"
+        msg = " ".join(args.message)
+        print(f"  Sending to {node_label(dest_ipn_target)}: {msg}")
+        if send_bundle(dest_ipn_target, msg):
+            print("  Sent.")
+        else:
+            print("  Failed.")
+        return
+
+    # Interactive mode
+    print("=" * 60)
+    print("  DTN Terminal Chat")
+    print(f"  Your node: {node_label(MY_IPN)}")
+    print(f"  Listening on: {recv_eid}")
+    if dest_ipn_target:
+        print(f"  Chatting with: {node_label(dest_ipn_target)}")
+    print("  Type a message and press Enter to send.")
+    print("  Commands: /to <IPN> — switch recipient")
+    print("            /nodes   — list known nodes")
+    print("            /quit    — exit")
+    print("=" * 60)
+    print()
+
+    # Start receiver
+    recv_thread = threading.Thread(target=receiver_thread, daemon=True)
+    recv_thread.start()
+
+    try:
+        while True:
+            try:
+                if dest_ipn_target:
+                    line = input(f"  you> ").strip()
+                else:
+                    line = input(f"  [{MY_IPN}]> ").strip()
+            except EOFError:
+                break
+
+            if not line:
+                continue
+            if line == "/quit" or line == "/exit" or line == "/q":
+                break
+            elif line.startswith("/to "):
+                dest_ipn_target = line[4:].strip().replace("ipn:", "")
+                print(f"  Now chatting with: {node_label(dest_ipn_target)}")
+                continue
+            elif line == "/nodes":
+                # Quick node list
+                out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+                for l in out.splitlines():
+                    l = l.strip().lstrip(":").strip()
+                    m = re.match(r"(\d+)\s+xmit\s+(\S+)", l)
+                    if m and m.group(1) != MY_IPN:
+                        print(f"    {node_label(m.group(1))} ({m.group(2)})")
+                continue
+            elif line.startswith("/"):
+                print("  Unknown command. Try /to, /nodes, /quit")
+                continue
+
+            if not dest_ipn_target:
+                print("  No recipient set. Use: /to <IPN>")
+                continue
+
+            if send_bundle(dest_ipn_target, line):
+                pass  # message sent silently
+            else:
+                print("  [send failed]")
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        running = False
+        print("\n  Chat ended.")
+        # Cleanup
+        import shutil as _shutil
+        _shutil.rmtree(recv_dir, ignore_errors=True)
+
+
 def cmd_trace(args):
     """Trace route to a destination node."""
     mod = _import_module("traceroute", "traceroute.py")
@@ -697,6 +871,11 @@ def main():
     sd.add_argument("dest", help="Destination IPN or 'all'")
     sd.add_argument("message", nargs="*", help="Message text")
 
+    # chat
+    ch = sub.add_parser("chat", help="Interactive terminal chat over DTN bundles")
+    ch.add_argument("dest", nargs="?", help="Destination IPN (or use /to inside chat)")
+    ch.add_argument("message", nargs="*", help="Message (one-shot mode)")
+
     # trace
     tr = sub.add_parser("trace", help="Trace route to a DTN node and identify issues")
     tr.add_argument("dest_ipn", help="Destination IPN number")
@@ -740,6 +919,7 @@ def main():
         "discover": cmd_discover,
         "disc": cmd_discover,
         "send": cmd_send,
+        "chat": cmd_chat,
         "trace": cmd_trace,
         "diagnose": cmd_diagnose,
         "contacts": cmd_contacts,
