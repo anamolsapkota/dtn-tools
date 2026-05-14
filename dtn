@@ -93,6 +93,21 @@ def run(cmd, **kwargs):
     return result.stdout.strip(), result.stderr.strip(), result.returncode
 
 
+def run_admin(program, commands):
+    """Run an ION admin program (ionadmin, bpadmin, ipnadmin) with commands.
+
+    Uses a temp file + stdin redirect instead of shell pipe to avoid hangs.
+    """
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.cmd', delete=False) as f:
+        f.write(commands if commands.endswith('\n') else commands + '\n')
+        tmp = f.name
+    try:
+        return run(f"{program} < {tmp} 2>&1")
+    finally:
+        os.unlink(tmp)
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -137,7 +152,7 @@ def cmd_status(_args):
     print(f"ION Version: {out}")
 
     # ION status
-    out, _, rc = run("echo 'l' | ionadmin 2>/dev/null | head -3")
+    out, _, rc = run_admin("ionadmin", "l\nq")
     if rc == 0 and out:
         print(f"ION Status: Running")
     else:
@@ -161,7 +176,7 @@ def cmd_status(_args):
     print()
 
     # Bundle stats
-    out, _, _ = run("echo 'w' | bpadmin 2>/dev/null | head -5")
+    out, _, _ = run_admin("bpadmin", "w\nq")
     if out:
         print("Bundle Protocol Stats:")
         for line in out.splitlines():
@@ -192,7 +207,7 @@ def cmd_neighbors(args):
 
 def list_neighbors():
     """List configured neighbors from ION plans."""
-    out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+    out, _, _ = run_admin("ipnadmin", "l plan\nq")
     if not out:
         print("No plans configured (is ION running?)")
         return
@@ -230,18 +245,18 @@ a range +1 +{duration} {MY_IPN} {ipn} 1
 a range +1 +{duration} {ipn} {MY_IPN} 1
 q
 """
-    out, err, rc = run(f"echo '{ion_cmds}' | ionadmin 2>&1")
+    out, err, rc = run_admin("ionadmin", ion_cmds)
     if rc != 0:
         print(f"ionadmin error: {err}")
         return
 
     # Add outduct
     bp_cmds = f"a outduct udp {ip}:{port} udpclo\nq\n"
-    run(f"echo '{bp_cmds}' | bpadmin 2>&1")
+    run_admin("bpadmin", bp_cmds)
 
     # Add plan
     ipn_cmds = f"a plan {ipn} udp/{ip}:{port}\nq\n"
-    run(f"echo '{ipn_cmds}' | ipnadmin 2>&1")
+    run_admin("ipnadmin", ipn_cmds)
 
     # Update neighbours.conf
     if os.path.exists(NEIGHBOURS_FILE):
@@ -334,7 +349,7 @@ def remove_neighbor(ipn):
     print(f"Removing neighbor ipn:{ipn}...")
 
     # Get the current plan to find the IP
-    out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+    out, _, _ = run_admin("ipnadmin", "l plan\nq")
     ip = None
     for line in out.splitlines():
         line = line.strip().lstrip(":").strip()
@@ -350,16 +365,16 @@ d range +1 {MY_IPN} {ipn}
 d range +1 {ipn} {MY_IPN}
 q
 """
-    run(f"echo '{ion_cmds}' | ionadmin 2>&1")
+    run_admin("ionadmin", ion_cmds)
 
     # Delete plan
     ipn_cmds = f"d plan {ipn}\nq\n"
-    run(f"echo '{ipn_cmds}' | ipnadmin 2>&1")
+    run_admin("ipnadmin", ipn_cmds)
 
     # Delete outduct if we found the IP
     if ip:
         bp_cmds = f"d outduct udp {ip}\nq\n"
-        run(f"echo '{bp_cmds}' | bpadmin 2>&1")
+        run_admin("bpadmin", bp_cmds)
 
     # Remove from neighbours.conf
     if os.path.exists(NEIGHBOURS_FILE):
@@ -383,7 +398,7 @@ def ping_neighbors(target_ipn=None):
     src = f"ipn:{MY_IPN}.3"
 
     # Get plans
-    out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+    out, _, _ = run_admin("ipnadmin", "l plan\nq")
     targets = []
     for line in out.splitlines():
         line = line.strip().lstrip(":").strip()
@@ -400,20 +415,30 @@ def ping_neighbors(target_ipn=None):
         return
 
     for ipn in targets:
-        dest = f"ipn:{ipn}.12161"
-        print(f"Pinging ipn:{ipn} ({src} -> {dest})...", end=" ", flush=True)
-        out, err, rc = run(f"timeout 10 bping -c 1 -i 1 {src} {dest} 2>&1")
-        if "bundle loss, time" in out:
-            # Parse RTT
-            m = re.search(r"time=(\S+)\s+s", out)
-            loss_m = re.search(r"(\d+\.?\d*)%\s+bundle loss", out)
-            rtt = f"{float(m.group(1))*1000:.0f}ms" if m else "?"
-            loss = loss_m.group(1) if loss_m else "?"
-            if float(loss_m.group(1) if loss_m else 100) == 0:
-                print(f"UP (rtt={rtt}, loss={loss}%)")
+        # Try standard bpecho endpoint .2, then .1 as fallback
+        result = None
+        for svc in ["2", "1"]:
+            dest = f"ipn:{ipn}.{svc}"
+            print(f"Pinging ipn:{ipn} ({src} -> {dest})...", end=" ", flush=True)
+            out, err, rc = run(f"timeout 15 bping -c 1 -i 1 {src} {dest} 2>&1")
+            if "bundle loss, time" in out:
+                m = re.search(r"time=(\S+)\s+s", out)
+                loss_m = re.search(r"(\d+\.?\d*)%\s+bundle loss", out)
+                rtt = f"{float(m.group(1))*1000:.0f}ms" if m else "?"
+                loss = float(loss_m.group(1)) if loss_m else 100
+                if loss == 0:
+                    print(f"UP (rtt={rtt})")
+                    result = "up"
+                else:
+                    print(f"DOWN (loss={loss:.0f}%)")
+                    result = "down"
+                break
             else:
-                print(f"DOWN (loss={loss}%)")
-        else:
+                if svc == "2":
+                    # First attempt failed, try .1
+                    print()
+                    continue
+        if result is None:
             print("DOWN (timeout)")
 
 
@@ -446,7 +471,7 @@ def cmd_send(args):
 
     if args.dest == "all":
         # Send to all neighbors
-        out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+        out, _, _ = run_admin("ipnadmin", "l plan\nq")
         targets = []
         for line in out.splitlines():
             line = line.strip().lstrip(":").strip()
@@ -514,16 +539,23 @@ def cmd_chat(args):
     def receiver_thread():
         """Background thread: run bprecvfile and poll for incoming messages."""
         import json as _json
-        # Start bprecvfile
+        # Start bprecvfile — no count limit so it runs continuously
         proc = subprocess.Popen(
-            ["bprecvfile", recv_eid, "1"],
+            ["bprecvfile", recv_eid],
             cwd=recv_dir,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        file_counter = 0
         while running:
             time.sleep(0.5)
+            # Restart bprecvfile if it died
+            if proc.poll() is not None and running:
+                proc = subprocess.Popen(
+                    ["bprecvfile", recv_eid],
+                    cwd=recv_dir,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             # Poll for new files
             try:
                 for fname in sorted(os.listdir(recv_dir)):
@@ -576,7 +608,7 @@ def cmd_chat(args):
     def list_nodes():
         """Show all reachable nodes from the contact graph."""
         # Get all unique IPNs from contact graph
-        out, _, _ = run("echo 'l contact' | ionadmin 2>/dev/null")
+        out, _, _ = run_admin("ionadmin", "l contact\nq")
         all_ipns = set()
         for l in out.splitlines():
             m = re.search(r"node\s+(\d+)\s+to\s+node\s+(\d+)", l)
@@ -586,7 +618,7 @@ def cmd_chat(args):
         all_ipns.discard(MY_IPN)
 
         # Get plans to mark direct neighbors
-        plan_out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+        plan_out, _, _ = run_admin("ipnadmin", "l plan\nq")
         plans = set()
         for l in plan_out.splitlines():
             l = l.strip().lstrip(":").strip()
@@ -709,7 +741,7 @@ def cmd_diagnose(_args):
 
 def cmd_contacts(_args):
     """List ION contacts."""
-    out, _, _ = run("echo 'l contact' | ionadmin 2>/dev/null")
+    out, _, _ = run_admin("ionadmin", "l contact\nq")
     if not out:
         print("No contacts (is ION running?)")
         return
@@ -745,7 +777,7 @@ def cmd_nodes(_args):
     detect_ipn()
 
     # Get all nodes from contact graph
-    out, _, _ = run("echo 'l contact' | ionadmin 2>/dev/null")
+    out, _, _ = run_admin("ionadmin", "l contact\nq")
     if not out:
         print("No contacts (is ION running?)")
         return
@@ -759,7 +791,7 @@ def cmd_nodes(_args):
 
     # Get plans (direct neighbors)
     plans = {}
-    plan_out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+    plan_out, _, _ = run_admin("ipnadmin", "l plan\nq")
     for line in plan_out.splitlines():
         line = line.strip().lstrip(":").strip()
         m = re.match(r"(\d+)\s+xmit\s+(\S+)", line)

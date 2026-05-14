@@ -790,8 +790,11 @@ def run_init(args):
     # IPN number — try to auto-detect from running ION
     detected_ipn = None
     if ion_running:
-        out, _ = run_cmd("echo 'l plan' | ipnadmin 2>/dev/null")
-        import re
+        import tempfile, re
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.cmd', delete=False) as _f:
+            _f.write("l plan\nq\n"); _tmp = _f.name
+        out, _ = run_cmd(f"ipnadmin < {_tmp} 2>/dev/null")
+        os.unlink(_tmp)
         for line in out.splitlines():
             line = line.strip().lstrip(":").strip()
             m = re.match(r"(\d+)\s+xmit\s+127\.0\.0\.1", line)

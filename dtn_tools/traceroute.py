@@ -59,10 +59,22 @@ def run(cmd, timeout=30):
         return ""
 
 
+def run_admin(program, commands, timeout=30):
+    """Run an ION admin program with commands via temp file (avoids pipe hangs)."""
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.cmd', delete=False) as f:
+        f.write(commands if commands.endswith('\n') else commands + '\n')
+        tmp = f.name
+    try:
+        return run(f"{program} < {tmp} 2>&1", timeout=timeout)
+    finally:
+        os.unlink(tmp)
+
+
 def get_my_ipn():
     """Detect local IPN from various sources."""
     # Method 1: loopback plan in ipnadmin (most reliable)
-    out = run("echo 'l plan' | ipnadmin 2>/dev/null")
+    out = run_admin("ipnadmin", "l plan\nq")
     for line in out.splitlines():
         line = line.strip().lstrip(":").strip()
         m = re.match(r"(\d+)\s+xmit\s+127\.0\.0\.1", line)
@@ -77,7 +89,7 @@ def get_my_ipn():
             return m.group(1)
 
     # Method 3: loopback contacts (self→self)
-    out = run("echo 'l contact' | ionadmin 2>/dev/null")
+    out = run_admin("ionadmin", "l contact\nq")
     for line in out.splitlines():
         m = re.search(r"node\s+(\d+)\s+to\s+node\s+(\d+)", line)
         if m and m.group(1) == m.group(2):
@@ -89,7 +101,7 @@ def get_my_ipn():
 def get_contacts():
     """Get all ION contacts as (from, to) pairs."""
     contacts = []
-    out = run("echo 'l contact' | ionadmin 2>/dev/null")
+    out = run_admin("ionadmin", "l contact\nq")
     for line in out.splitlines():
         m = re.search(r"node\s+(\d+)\s+to\s+node\s+(\d+)", line)
         if m:
@@ -100,7 +112,7 @@ def get_contacts():
 def get_ranges():
     """Get all ION ranges as (from, to) pairs."""
     ranges = []
-    out = run("echo 'l range' | ionadmin 2>/dev/null")
+    out = run_admin("ionadmin", "l range\nq")
     for line in out.splitlines():
         m = re.search(r"node\s+(\d+)\s+to\s+node\s+(\d+)", line)
         if m:
@@ -111,7 +123,7 @@ def get_ranges():
 def get_plans():
     """Get ION plans as {ipn: outduct_ip}."""
     plans = {}
-    out = run("echo 'l plan' | ipnadmin 2>/dev/null")
+    out = run_admin("ipnadmin", "l plan\nq")
     for line in out.splitlines():
         line = line.strip().lstrip(":").strip()
         m = re.match(r"(\d+)\s+xmit\s+(\S+)", line)
