@@ -160,9 +160,12 @@ def cmd_status(_args):
     print(f"Host RC:  {HOST_RC}")
     print()
 
-    # ION version
-    out, _, _ = run("bpversion 2>/dev/null || echo 'ION not running'")
-    print(f"ION Version: {out}")
+    # ION version — bpversion returns rc=7 on success (outputs "bpv7"), so don't use ||
+    out, _, _ = run("bpversion 2>/dev/null")
+    if out and out.strip():
+        print(f"ION Version: {out}")
+    else:
+        print("ION not installed or not in PATH")
 
     # ION status
     out, _, rc = run_admin("ionadmin", "l\nq")
@@ -173,17 +176,27 @@ def cmd_status(_args):
 
     print()
 
-    # Service status
+    # Service status — check systemd first, fall back to process detection
     services = ["ionwd", "dtnex", "bpecho", "dtn-chat", "dtn-discovery", "dtn-metadata-updater"]
     print(f"{'Service':<25} {'Status':<12} {'PID'}")
     print("-" * 55)
     for svc in services:
-        out, _, rc = run(f"systemctl is-active {svc}.service 2>/dev/null")
-        status = out if rc == 0 else "inactive"
+        status = "inactive"
         pid = ""
-        if status == "active":
+        # Try systemd first
+        out, _, rc = run(f"systemctl is-active {svc}.service 2>/dev/null")
+        if rc == 0 and out.strip() == "active":
+            status = "active"
             p_out, _, _ = run(f"systemctl show {svc}.service --property=MainPID --value 2>/dev/null")
-            pid = p_out
+            pid = p_out.strip()
+        else:
+            # Fallback: check for running process
+            pattern = _get_proc_pattern(svc)
+            if pattern:
+                p_out, _, prc = run(f"pgrep -f '{pattern}' 2>/dev/null")
+                if prc == 0 and p_out.strip():
+                    status = "running"
+                    pid = p_out.strip().split('\n')[0]
         print(f"{svc:<25} {status:<12} {pid}")
 
     print()
