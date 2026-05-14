@@ -13,6 +13,7 @@ Usage:
     dtn discover search <query>     Search discovered nodes
     dtn send <IPN> <message>        Send a DTN bundle message
     dtn send all <message>          Send to all neighbors
+    dtn sensor                      Send BME280 sensor data to Bundle Board
     dtn chat [IPN]                  Interactive terminal chat over DTN
     dtn chat <IPN> <message>        Send a chat message (one-shot)
     dtn contacts                    List ION contacts
@@ -514,6 +515,41 @@ def cmd_send(args):
             print(f"Failed: {err}")
 
 
+BUNDLE_BOARD_DEST = "ipn:268484800.6"
+
+
+def cmd_sensor(args):
+    """Send sensor data bundle (bpbme280) to the IPNSIG Bundle Board."""
+    detect_ipn()
+
+    # Check if bpbme280 is installed
+    _, _, rc = run("which bpbme280 2>/dev/null")
+    if rc != 0:
+        print("bpbme280 not installed. Install it with:")
+        print(f"  cd {DTN_DIR} && git clone https://github.com/samograsic/bpbme280.git")
+        print("  cd bpbme280 && make && sudo make install")
+        sys.exit(1)
+
+    src = f"ipn:{MY_IPN}.1"
+    dest = getattr(args, "dest", None) or BUNDLE_BOARD_DEST
+    ttl = getattr(args, "ttl", None) or "600"
+    location = getattr(args, "location", None) or ""
+
+    cmd_parts = ["bpbme280", src, dest, f"-t{ttl}"]
+    if location:
+        cmd_parts.append(f"-loc{location}")
+
+    cmd_str = " ".join(cmd_parts)
+    print(f"Sending sensor data: {cmd_str}")
+    out, err, rc = run(cmd_str, timeout=30)
+    if out:
+        print(out)
+    if rc == 0:
+        print("Sensor bundle sent to Bundle Board.")
+    else:
+        print(f"Failed: {err}")
+
+
 def cmd_chat(args):
     """Interactive terminal chat over DTN bundles."""
     import threading
@@ -865,7 +901,7 @@ def cmd_plans(_args):
     list_neighbors()
 
 
-DTN_SERVICES = ["dtnex", "dtn-chat", "dtn-discovery", "dtn-metadata-updater", "ionwd", "bpecho"]
+DTN_SERVICES = ["ionwd", "dtnex", "bpecho", "dtn-chat", "dtn-discovery", "dtn-metadata-updater"]
 
 SERVICE_ALIASES = {
     "chat": "dtn-chat",
@@ -889,10 +925,55 @@ def _resolve_service(name):
         return SERVICE_ALIASES[name]
     if name in DTN_SERVICES:
         return name
-    # Try with dtn- prefix
     if f"dtn-{name}" in DTN_SERVICES:
         return f"dtn-{name}"
-    return name  # pass through as-is
+    return name
+
+
+def _has_systemd_unit(svc):
+    """Check if a systemd service unit file exists."""
+    _, _, rc = run(f"systemctl list-unit-files {svc}.service 2>/dev/null | grep -q {svc}")
+    return rc == 0
+
+
+def _get_direct_cmd(svc):
+    """Get the direct command to run a service without systemd."""
+    detect_ipn()
+    cmds = {
+        "dtnex": f"dtnex --service" if os.path.exists(os.path.join(DTN_DIR, "dtnex.conf")) else f"dtnex {os.path.join(DTN_DIR, 'dtnex.conf')}",
+        "bpecho": f"bpecho ipn:{MY_IPN}.2",
+        "dtn-chat": None,  # web chat app — needs app.py
+        "dtn-discovery": None,  # needs discovery.py
+        "dtn-metadata-updater": None,  # needs script
+        "ionwd": None,  # needs ionwd.sh
+    }
+    # Build paths for services that need them
+    chat_app = os.path.join(DTN_DIR, "dtn-chat", "app.py")
+    if os.path.exists(chat_app):
+        cmds["dtn-chat"] = f"python3 {chat_app}"
+    discovery_py = os.path.join(DTN_DIR, "dtn-discovery", "discovery.py")
+    if os.path.exists(discovery_py):
+        cmds["dtn-discovery"] = f"python3 {discovery_py}"
+    updater_sh = os.path.join(DTN_DIR, "scripts", "dtn-metadata-updater.sh")
+    if os.path.exists(updater_sh):
+        cmds["dtn-metadata-updater"] = updater_sh
+    ionwd_sh = os.path.join(DTN_DIR, "ionwd", "ionwd.sh")
+    if os.path.exists(ionwd_sh):
+        cmds["ionwd"] = ionwd_sh
+    return cmds.get(svc)
+
+
+def _get_proc_pattern(svc):
+    """Get a pattern to find the running process for a service."""
+    patterns = {
+        "dtnex": "dtnex",
+        "bpecho": f"bpecho ipn:.*\\.2",
+        "dtn-chat": "dtn-chat/app.py",
+        "dtn-discovery": "dtn-discovery/discovery.py",
+        "dtn-metadata-updater": "dtn-metadata-updater.sh",
+        "ionwd": "ionwd.sh",
+    }
+    return patterns.get(svc, svc)
 
 
 def _stop_ion():
@@ -917,33 +998,65 @@ def _start_ion():
     return True
 
 
-def _stop_services(services=None):
-    """Stop systemd services."""
-    svcs = services or ["dtn-discovery", "dtn-chat", "dtnex", "dtn-metadata-updater"]
-    for svc in svcs:
+def _stop_service(svc):
+    """Stop a single service (systemd or direct)."""
+    if _has_systemd_unit(svc):
         run(f"sudo systemctl stop {svc}.service 2>/dev/null", timeout=30)
-        print(f"  stopped {svc}")
+        print(f"  {svc}: stopped")
+    else:
+        # Kill by process pattern
+        pattern = _get_proc_pattern(svc)
+        run(f"pkill -f '{pattern}' 2>/dev/null", timeout=10)
+        print(f"  {svc}: stopped (process)")
 
 
-def _start_services(services=None):
-    """Start systemd services."""
-    svcs = services or ["ionwd", "dtnex", "bpecho", "dtn-chat", "dtn-discovery", "dtn-metadata-updater"]
+def _stop_services(services=None):
+    """Stop services."""
+    svcs = services or ["dtn-discovery", "dtn-metadata-updater", "dtn-chat", "dtnex", "bpecho"]
     for svc in svcs:
-        # Check if service file exists first
-        _, _, exists_rc = run(f"systemctl list-unit-files {svc}.service 2>/dev/null | grep -q {svc}")
-        if exists_rc != 0:
-            print(f"  {svc}: no service file (run 'dtn init' to create)")
-            continue
+        _stop_service(svc)
+
+
+def _start_service(svc):
+    """Start a single service (systemd or direct fallback)."""
+    if _has_systemd_unit(svc):
         run(f"sudo systemctl start {svc}.service 2>/dev/null", timeout=30)
         _, _, rc = run(f"systemctl is-active {svc}.service 2>/dev/null")
         if rc == 0:
             print(f"  {svc}: started")
         else:
-            out, _, _ = run(f"systemctl status {svc}.service 2>/dev/null | head -5")
+            out, _, _ = run(f"systemctl status {svc}.service 2>/dev/null | head -3")
             print(f"  {svc}: failed to start")
             if out:
-                for line in out.split('\n')[:3]:
+                for line in out.strip().split('\n')[:2]:
                     print(f"    {line.strip()}")
+    else:
+        # Direct process fallback
+        cmd = _get_direct_cmd(svc)
+        if not cmd:
+            print(f"  {svc}: not installed (run 'dtn init' to set up)")
+            return
+        # Check if already running
+        pattern = _get_proc_pattern(svc)
+        _, _, rc = run(f"pgrep -f '{pattern}' >/dev/null 2>&1")
+        if rc == 0:
+            print(f"  {svc}: already running")
+            return
+        run(f"nohup {cmd} >/dev/null 2>&1 &", timeout=10)
+        import time
+        time.sleep(1)
+        _, _, rc = run(f"pgrep -f '{pattern}' >/dev/null 2>&1")
+        if rc == 0:
+            print(f"  {svc}: started (direct)")
+        else:
+            print(f"  {svc}: failed to start")
+
+
+def _start_services(services=None):
+    """Start services."""
+    svcs = services or DTN_SERVICES
+    for svc in svcs:
+        _start_service(svc)
 
 
 def cmd_start(args):
@@ -1004,6 +1117,25 @@ def cmd_restart(args):
         _start_services([target])
 
 
+def _enable_service(svc):
+    """Enable a single service on boot."""
+    if _has_systemd_unit(svc):
+        run(f"sudo systemctl enable {svc}.service 2>/dev/null", timeout=30)
+        _, _, rc = run(f"systemctl is-enabled {svc}.service 2>/dev/null")
+        print(f"  {svc}: {'enabled' if rc == 0 else 'failed'}")
+    else:
+        print(f"  {svc}: no service file (run 'dtn init' to create)")
+
+
+def _disable_service(svc):
+    """Disable a single service on boot."""
+    if _has_systemd_unit(svc):
+        run(f"sudo systemctl disable {svc}.service 2>/dev/null", timeout=30)
+        print(f"  {svc}: disabled")
+    else:
+        print(f"  {svc}: no service file")
+
+
 def cmd_enable(args):
     """Enable DTN services to start on boot."""
     target = _resolve_service(getattr(args, "service", None))
@@ -1011,20 +1143,12 @@ def cmd_enable(args):
     if target is None or target == "all":
         print("Enabling all DTN services on boot...")
         for svc in DTN_SERVICES:
-            run(f"sudo systemctl enable {svc}.service 2>/dev/null", timeout=30)
-            _, _, rc = run(f"systemctl is-enabled {svc}.service 2>/dev/null")
-            status = "enabled" if rc == 0 else "not available"
-            print(f"  {svc}: {status}")
+            _enable_service(svc)
     elif target == "ion":
         print("Enabling ionwd (ION watchdog) on boot...")
-        run("sudo systemctl enable ionwd.service 2>/dev/null", timeout=30)
-        _, _, rc = run("systemctl is-enabled ionwd.service 2>/dev/null")
-        print(f"  ionwd: {'enabled' if rc == 0 else 'not available'}")
+        _enable_service("ionwd")
     else:
-        run(f"sudo systemctl enable {target}.service 2>/dev/null", timeout=30)
-        _, _, rc = run(f"systemctl is-enabled {target}.service 2>/dev/null")
-        status = "enabled" if rc == 0 else "not available"
-        print(f"{target}: {status}")
+        _enable_service(target)
 
 
 def cmd_disable(args):
@@ -1034,14 +1158,11 @@ def cmd_disable(args):
     if target is None or target == "all":
         print("Disabling all DTN services on boot...")
         for svc in DTN_SERVICES:
-            run(f"sudo systemctl disable {svc}.service 2>/dev/null", timeout=30)
-            print(f"  {svc}: disabled")
+            _disable_service(svc)
     elif target == "ion":
-        run("sudo systemctl disable ionwd.service 2>/dev/null", timeout=30)
-        print("ionwd: disabled")
+        _disable_service("ionwd")
     else:
-        run(f"sudo systemctl disable {target}.service 2>/dev/null", timeout=30)
-        print(f"{target}: disabled")
+        _disable_service(target)
 
 
 def cmd_logs(args):
@@ -1132,6 +1253,12 @@ def main():
     sd.add_argument("dest", help="Destination IPN or 'all'")
     sd.add_argument("message", nargs="*", help="Message text")
 
+    # sensor
+    sn = sub.add_parser("sensor", help="Send BME280 sensor data to IPNSIG Bundle Board")
+    sn.add_argument("--dest", help=f"Destination EID (default: {BUNDLE_BOARD_DEST})")
+    sn.add_argument("--ttl", help="Bundle TTL in seconds (default: 600)")
+    sn.add_argument("--location", "-l", help="Location string identifier")
+
     # chat
     ch = sub.add_parser("chat", help="Interactive terminal chat over DTN bundles")
     ch.add_argument("dest", nargs="?", help="Destination IPN (or use /to inside chat)")
@@ -1202,6 +1329,7 @@ def main():
         "discover": cmd_discover,
         "disc": cmd_discover,
         "send": cmd_send,
+        "sensor": cmd_sensor,
         "chat": cmd_chat,
         "trace": cmd_trace,
         "diagnose": cmd_diagnose,

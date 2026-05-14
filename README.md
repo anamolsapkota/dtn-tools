@@ -76,6 +76,7 @@ dtn send 268485000 "Hello from my DTN node"
 | `dtn chat [IPN]` | Interactive terminal chat over DTN bundles |
 | `dtn chat <IPN> "message"` | Send a one-shot chat message |
 | `dtn send <IPN> "message"` | Send a raw DTN bundle |
+| `dtn sensor` | Send BME280 sensor data to IPNSIG Bundle Board |
 | `dtn trace <IPN>` | Trace the bundle route and identify issues |
 | `dtn diagnose` | Full diagnostics on all nodes and routes |
 | `dtn contacts` | List all ION contact graph edges |
