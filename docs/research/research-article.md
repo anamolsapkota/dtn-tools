@@ -1,7 +1,7 @@
 # dtn-tools: A Unified Command-Line Toolkit for ION-DTN Node Management in Terrestrial Research Networks
 
 **Anamol Sapkota**
-Department of Computer Science and Engineering, Kathmandu University, Dhulikhel, Nepal
+Independent Researcher, Kathmandu, Nepal
 
 ---
 
@@ -44,9 +44,25 @@ ION uses CGR to compute routes through time-varying network topologies. A contac
 
 The OpenIPN network (openipn.org), operated by the Interplanetary Networking Special Interest Group (IPNSIG), provides a global DTN research testbed. Nodes register for IPN numbers and connect via VPN overlays (Tailscale, ZeroTier). The network includes a gateway node (DTNGW, ipn:268485000) that routes bundles between nodes, a monitoring system that pings nodes' bpecho endpoints, and a Bundle Board that collects and displays sensor data bundles. At the time of writing, approximately 40 nodes from multiple countries participate.
 
-### 2.4 Existing Management Tools
+### 2.4 DTN Management Standards
 
-The dtnex protocol enables automatic contact and metadata exchange between ION nodes. ionwd provides watchdog monitoring to restart ION after crashes. However, no unified management interface exists for ION-DTN. Operators interact directly with the admin programs. In contrast, uD3TN provides a REST API, and DTN7-go includes built-in management, but neither is compatible with ION's ecosystem or the OpenIPN network.
+RFC 9675 (November 2024) defines the DTN Management Architecture (DTNMA), recognizing that current DTN deployments rely on "pre-placed keys and bespoke tooling" for management. DTNMA addresses Operations, Administration, and Management (OAM) challenges, but focuses on protocol-level management rather than operational tooling. The gap between management architecture standards and practical deployment tools remains wide.
+
+### 2.5 Recent DTN Deployments
+
+DTN has seen significant operational success in 2024-2025. NASA's PACE mission became the first Class-B NASA mission using DTN operationally, transmitting 34 million bundles with a 100% success rate. NASA's HDTN streamed 4K UHD video between a PC-12 aircraft and the ISS at 900+ Mbps using BPv7 with BPSec. The DTN-COMET project (2025) developed automated containerized testbeds for multi-implementation benchmarking. These successes demonstrate DTN's maturity while highlighting the need for better operational tooling.
+
+### 2.6 Existing Management Tools
+
+The dtnex protocol enables automatic contact and metadata exchange between ION nodes. ionwd provides watchdog monitoring to restart ION after crashes. However, no unified management interface exists for ION-DTN. Operators interact directly with the admin programs.
+
+Other DTN implementations offer varying management approaches:
+- **uD3TN**: Python management library (ud3tn-utils) with AAP2Client for daemon interaction
+- **DTN7-go**: REST API, WebSocket API, and UNIX socket interface with `dtnclient` CLI
+- **HDTN**: Web-based GUI with configuration interface and telemetry dashboard
+- **DTNME**: C++ implementation used operationally on the ISS
+
+None of these are compatible with ION's ecosystem or the OpenIPN network, and none provide the unified setup-to-monitoring CLI experience that dtn-tools offers.
 
 ## 3. System Design
 
@@ -168,7 +184,7 @@ The `dtn sensor` command wraps the bpbme280 tool to send BME280/BMP280 environme
 We deployed dtn-tools on two nodes connected to the OpenIPN network:
 
 - **Pi05** (ipn:268485091): Raspberry Pi 4 running Raspberry Pi OS, located in Kathmandu, Nepal. Connected to DTNGW via Tailscale VPN and to Echo via ZeroTier.
-- **Echo** (ipn:268485111): x86_64 server running Ubuntu 22.04, located at Kathmandu University, Dhulikhel, Nepal. Connected to Pi05 via ZeroTier local network.
+- **Echo** (ipn:268485111): x86_64 server running Ubuntu 22.04, located in Dhulikhel, Nepal. Connected to Pi05 via ZeroTier local network.
 
 Echo relays gateway traffic through Pi05 (port 4557 on ZeroTier), requiring Pi05 to have UDP inducts on both port 4556 (Tailscale) and 4557 (ZeroTier relay).
 
@@ -304,10 +320,22 @@ dtn-tools is open source under the MIT License:
 
 [6] S. Burleigh, "Contact Graph Routing," Internet-Draft, IETF, 2010.
 
-[7] S. Grasic and E. Lindgren, "An Analysis of Evaluation Practices for Delay-Tolerant Networking," IEEE Communications Surveys & Tutorials, 2015.
+[7] E. Birrane and S. Heiner, "Delay-Tolerant Networking Management Architecture (DTNMA)," RFC 9675, IETF, November 2024.
 
-[8] L. Wood et al., "Using HTTP for Delivery in Delay-/Disruption-Tolerant Networks," Internet-Draft, IETF, 2009.
+[8] S. Grasic, "OpenIPN: Building a Global DTN Research Network," IPNSIG Technical Report, 2023.
 
 [9] M. Feldmann and F. Walter, "uD3TN: A Lightweight DTN Protocol Implementation for Microcontrollers," Proceedings of the International Conference on Networked Systems, 2021.
 
-[10] S. Grasic, "OpenIPN: Building a Global DTN Research Network," IPNSIG Technical Report, 2023.
+[10] S. Grasic and E. Lindgren, "An Analysis of Evaluation Practices for Delay-Tolerant Networking," IEEE Communications Surveys & Tutorials, 2015.
+
+[11] B. Nöthlich et al., "DTN-COMET: Automated Containerized Testbeds for Multi-Implementation Benchmarking," January 2025.
+
+[12] NASA Goddard Space Flight Center, "PACE Mission DTN Operations Report," NASA Technical Reports Server, 2024.
+
+[13] NASA Glenn Research Center, "HDTN 4K UHD Video Streaming over BPv7 between PC-12 Aircraft and ISS," NASA Technical Reports Server, 2024.
+
+[14] T. Johnson, "DTN IP Neighbor Discovery (IPND)," Internet-Draft, IETF, 2019.
+
+[15] H. Kruse et al., "Datagram Convergence Layers for the Delay- and Disruption-Tolerant Networking (DTN) Bundle Protocol and Licklider Transmission Protocol (LTP)," RFC 7122, IETF, March 2014.
+
+[16] IETF DTN Working Group, "Bundle Protocol Version 7 Administrative Record Types Registry," RFC 9713, IETF, January 2025.

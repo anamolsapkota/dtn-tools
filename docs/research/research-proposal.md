@@ -7,8 +7,8 @@
 ## 2. Principal Investigator
 
 Anamol Sapkota
-Kathmandu University, Department of Computer Science and Engineering
-Dhulikhel, Kavre, Nepal
+Independent Researcher
+Kathmandu, Nepal
 
 ## 3. Abstract
 
@@ -102,10 +102,13 @@ Additional connectivity to 40+ nodes in the OpenIPN global network via the DTNGW
 
 - **ION-DTN** (NASA JPL): The reference BPv7 implementation used as our underlying engine. Provides admin programs but no unified management interface.
 - **dtnex** (Samo Grasic): Metadata exchange protocol that enables automatic contact sharing between ION nodes. dtn-tools integrates dtnex as a discovery source.
-- **uD3TN** (D3TN): Lightweight DTN implementation with a REST API for management — a different approach (HTTP API vs CLI).
-- **DTN7-go**: DTN implementation in Go with built-in management. Not ION-compatible.
-- **HDTN** (NASA Glenn): High-rate DTN implementation focused on performance. Limited management tooling.
-- **OpenIPN** (IPNSIG): Global DTN network registry and monitoring. dtn-tools integrates as both a data source and a deployment target.
+- **RFC 9675 — DTNMA** (November 2024): DTN Management Architecture standard addressing OAM challenges. Focuses on protocol-level management but does not provide operational tooling.
+- **uD3TN** (D3TN): Lightweight DTN implementation with Python management library (ud3tn-utils) and AAP2Client. Different approach (library API vs CLI).
+- **DTN7-go**: DTN implementation in Go with REST API, WebSocket API, and `dtnclient` CLI. Not ION-compatible.
+- **HDTN** (NASA Glenn): High-rate DTN implementation with web-based GUI dashboard. Streamed 4K UHD video over BPv7 at 900+ Mbps in 2024. Management via web interface, not CLI.
+- **DTN-COMET** (2025): Automated containerized testbed for multi-implementation benchmarking. Focuses on performance evaluation, not operational management.
+- **NASA PACE Mission** (2024): First Class-B NASA mission using DTN operationally — 34M bundles with 100% success rate, demonstrating DTN maturity.
+- **OpenIPN / IPNSIG**: Global DTN network with 40+ nodes and 1000+ members. dtn-tools integrates as both a data source and deployment target.
 
 No comparable unified CLI toolkit exists for ION-DTN node management.
 
@@ -117,7 +120,14 @@ This is a software-only project. Hardware (Raspberry Pi, sensors) is already ava
 
 [1] S. Burleigh et al., "Bundle Protocol Version 7," RFC 9171, IETF, January 2022.
 [2] S. Burleigh, "Interplanetary Overlay Network (ION) Design and Operation," JPL, 2020.
-[3] Samo Grasic, "OpenIPN: An Open Interplanetary Network for DTN Research," IPNSIG, 2023.
+[3] S. Grasic, "OpenIPN: An Open Interplanetary Network for DTN Research," IPNSIG, 2023.
 [4] K. Scott and S. Burleigh, "Bundle Protocol Specification," RFC 5050, IETF, November 2007.
 [5] E. Birrane et al., "Bundle Protocol Security (BPSec)," RFC 9172, IETF, January 2022.
-[6] S. Burleigh, "Contact Graph Routing," Internet-Draft, IETF, 2020.
+[6] S. Burleigh, "Contact Graph Routing," Internet-Draft, IETF, 2010.
+[7] E. Birrane and S. Heiner, "Delay-Tolerant Networking Management Architecture (DTNMA)," RFC 9675, IETF, November 2024.
+[8] V. Cerf et al., "Delay-Tolerant Networking Architecture," RFC 4838, IETF, April 2007.
+[9] B. Nöthlich et al., "DTN-COMET: Automated Containerized Testbeds for Multi-Implementation Benchmarking," January 2025.
+[10] NASA GSFC, "PACE Mission DTN Operations Report," NASA Technical Reports Server, 2024.
+[11] NASA GRC, "HDTN 4K UHD Video Streaming over BPv7," NASA Technical Reports Server, 2024.
+[12] M. Feldmann and F. Walter, "uD3TN: A Lightweight DTN Protocol Implementation," Proceedings of NetSys, 2021.
+[13] IETF DTN WG, "Bundle Protocol Version 7 Administrative Record Types Registry," RFC 9713, January 2025.
