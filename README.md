@@ -80,7 +80,11 @@ dtn send 268485000 "Hello from my DTN node"
 | `dtn diagnose` | Full diagnostics on all nodes and routes |
 | `dtn contacts` | List all ION contact graph edges |
 | `dtn plans` | List ION forwarding plans |
-| `dtn restart` | Restart ION and all DTN services |
+| `dtn start [service]` | Start ION and/or a specific service |
+| `dtn stop [service]` | Stop ION and/or a specific service |
+| `dtn restart [service]` | Restart ION and/or a specific service |
+| `dtn enable [service]` | Enable services to start on boot |
+| `dtn disable [service]` | Disable services from starting on boot |
 | `dtn logs [service]` | Tail service logs |
 | `dtn config` | Show node configuration |
 
@@ -109,7 +113,7 @@ $ dtn chat
 ============================================================
   DTN Terminal Chat
   Your node: pi05-anamol (ipn:268485091)
-  Listening on: ipn:268485091.8
+  Listening on: ipn:268485091.5
 ============================================================
 
   Available nodes (39):

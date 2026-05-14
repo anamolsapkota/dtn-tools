@@ -18,7 +18,11 @@ Usage:
     dtn contacts                    List ION contacts
     dtn nodes                       List all unique nodes in the contact graph
     dtn plans                       List ION plans
-    dtn restart                     Restart ION and all DTN services
+    dtn start [service]             Start ION and/or a specific service
+    dtn stop [service]              Stop ION and/or a specific service
+    dtn restart [service]           Restart ION and/or a specific service
+    dtn enable [service]            Enable services to start on boot
+    dtn disable [service]           Disable services from starting on boot
     dtn logs [service]              Tail logs (dtnex, discovery, ionwd, chat)
     dtn config                      Show current node configuration
 """
@@ -87,25 +91,33 @@ def detect_ipn():
     HOST_RC = os.path.join(DTN_DIR, f"host{MY_IPN}.rc")
 
 
-def run(cmd, **kwargs):
+def run(cmd, timeout=30, **kwargs):
     """Run a shell command and return output."""
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30, **kwargs)
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout, **kwargs)
     return result.stdout.strip(), result.stderr.strip(), result.returncode
 
 
-def run_admin(program, commands):
+def run_admin(program, commands, timeout=30):
     """Run an ION admin program (ionadmin, bpadmin, ipnadmin) with commands.
 
-    Uses a temp file + stdin redirect instead of shell pipe to avoid hangs.
+    Uses subprocess.communicate(input=) for reliable stdin delivery.
     """
-    import tempfile
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.cmd', delete=False) as f:
-        f.write(commands if commands.endswith('\n') else commands + '\n')
-        tmp = f.name
+    cmds = commands if commands.endswith('\n') else commands + '\n'
     try:
-        return run(f"{program} < {tmp} 2>&1")
-    finally:
-        os.unlink(tmp)
+        proc = subprocess.Popen(
+            [program], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True
+        )
+        out, err = proc.communicate(input=cmds, timeout=timeout)
+        return out.strip(), err.strip(), proc.returncode
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return "", f"timeout after {timeout}s", 124
+    except FileNotFoundError:
+        return "", f"{program} not found", 1
+    except Exception as e:
+        return "", str(e), 1
 
 
 # ---------------------------------------------------------------------------
@@ -246,9 +258,13 @@ a range +1 +{duration} {ipn} {MY_IPN} 1
 q
 """
     out, err, rc = run_admin("ionadmin", ion_cmds)
-    if rc != 0:
+    if rc != 0 and rc != 124:
         print(f"ionadmin error: {err}")
         return
+
+    # Brief pause to let ION process route updates before modifying plans
+    import time
+    time.sleep(2)
 
     # Add outduct
     bp_cmds = f"a outduct udp {ip}:{port} udpclo\nq\n"
@@ -393,9 +409,20 @@ q
 
 
 def ping_neighbors(target_ipn=None):
-    """Ping one or all neighbors."""
+    """Ping one or all neighbors.
+
+    target_ipn can be:
+      - None: ping all neighbors on .12161
+      - "268485091": ping one neighbor on .12161
+      - "268485091.2": ping one neighbor on specific service number
+    """
     detect_ipn()
     src = f"ipn:{MY_IPN}.3"
+
+    # Parse optional service number from target
+    svc = "12161"  # default: openipn.org bpecho endpoint
+    if target_ipn and "." in target_ipn:
+        target_ipn, svc = target_ipn.rsplit(".", 1)
 
     # Get plans
     out, _, _ = run_admin("ipnadmin", "l plan\nq")
@@ -410,35 +437,28 @@ def ping_neighbors(target_ipn=None):
                     continue
                 targets.append(n)
 
+    # Allow pinging any IPN (not just neighbors with plans)
+    if target_ipn and target_ipn not in targets:
+        targets = [target_ipn]
+
     if not targets:
         print("No neighbors to ping.")
         return
 
     for ipn in targets:
-        # Try standard bpecho endpoint .2, then .1 as fallback
-        result = None
-        for svc in ["2", "1"]:
-            dest = f"ipn:{ipn}.{svc}"
-            print(f"Pinging ipn:{ipn} ({src} -> {dest})...", end=" ", flush=True)
-            out, err, rc = run(f"timeout 15 bping -c 1 -i 1 {src} {dest} 2>&1")
-            if "bundle loss, time" in out:
-                m = re.search(r"time=(\S+)\s+s", out)
-                loss_m = re.search(r"(\d+\.?\d*)%\s+bundle loss", out)
-                rtt = f"{float(m.group(1))*1000:.0f}ms" if m else "?"
-                loss = float(loss_m.group(1)) if loss_m else 100
-                if loss == 0:
-                    print(f"UP (rtt={rtt})")
-                    result = "up"
-                else:
-                    print(f"DOWN (loss={loss:.0f}%)")
-                    result = "down"
-                break
+        dest = f"ipn:{ipn}.{svc}"
+        print(f"Pinging ipn:{ipn} ({src} -> {dest})...", end=" ", flush=True)
+        out, err, rc = run(f"timeout 15 bping -c 1 -i 1 {src} {dest} 2>&1")
+        if "bundle loss, time" in out:
+            m = re.search(r"time=(\S+)\s+s", out)
+            loss_m = re.search(r"(\d+\.?\d*)%\s+bundle loss", out)
+            rtt = f"{float(m.group(1))*1000:.0f}ms" if m else "?"
+            loss = float(loss_m.group(1)) if loss_m else 100
+            if loss == 0:
+                print(f"UP (rtt={rtt})")
             else:
-                if svc == "2":
-                    # First attempt failed, try .1
-                    print()
-                    continue
-        if result is None:
+                print(f"DOWN (loss={loss:.0f}%)")
+        else:
             print("DOWN (timeout)")
 
 
@@ -502,10 +522,13 @@ def cmd_chat(args):
     import signal
 
     detect_ipn()
-    CHAT_SVC = "8"  # service number for terminal chat
+    CHAT_SVC = "5"  # service number for terminal chat (standard endpoint on all nodes)
     recv_dir = tempfile.mkdtemp(prefix="dtn-chat-")
     recv_eid = f"ipn:{MY_IPN}.{CHAT_SVC}"
     running = True
+
+    # Ensure chat endpoint exists in ION
+    run_admin("bpadmin", f"a endpoint {recv_eid} q\nq\n")
 
     # Load discovery DB for node names
     node_names = {}
@@ -842,31 +865,173 @@ def cmd_plans(_args):
     list_neighbors()
 
 
-def cmd_restart(_args):
-    """Restart ION and all DTN services."""
-    detect_ipn()
-    print("Stopping services...")
-    for svc in ["dtn-discovery", "dtn-chat", "dtnex", "dtn-metadata-updater"]:
-        run(f"sudo systemctl stop {svc}.service 2>/dev/null")
+DTN_SERVICES = ["dtnex", "dtn-chat", "dtn-discovery", "dtn-metadata-updater", "ionwd", "bpecho"]
 
-    print("Stopping ION...")
-    run("ionstop 2>/dev/null")
+SERVICE_ALIASES = {
+    "chat": "dtn-chat",
+    "discovery": "dtn-discovery",
+    "metadata": "dtn-metadata-updater",
+    "meta": "dtn-metadata-updater",
+    "updater": "dtn-metadata-updater",
+    "watchdog": "ionwd",
+    "echo": "bpecho",
+}
+
+
+def _resolve_service(name):
+    """Resolve a service alias to the systemd unit name."""
+    if not name:
+        return None
+    name = name.lower().strip()
+    if name in ("ion", "all"):
+        return name
+    if name in SERVICE_ALIASES:
+        return SERVICE_ALIASES[name]
+    if name in DTN_SERVICES:
+        return name
+    # Try with dtn- prefix
+    if f"dtn-{name}" in DTN_SERVICES:
+        return f"dtn-{name}"
+    return name  # pass through as-is
+
+
+def _stop_ion():
+    """Stop ION cleanly."""
     import time
+    print("Stopping ION...")
+    run("ionstop 2>/dev/null", timeout=60)
     time.sleep(2)
-    run("killm 2>/dev/null")
+    run("killm 2>/dev/null", timeout=30)
     time.sleep(1)
 
+
+def _start_ion():
+    """Start ION from host.rc."""
+    detect_ipn()
     print(f"Starting ION from {HOST_RC}...")
-    out, err, rc = run(f"ionstart -I {HOST_RC} 2>&1")
+    out, err, rc = run(f"ionstart -I {HOST_RC} 2>&1", timeout=120)
     if rc != 0:
         print(f"ION start failed: {err}")
-        return
+        return False
+    print("ION started.")
+    return True
 
-    print("Starting services...")
-    for svc in ["dtnex", "dtn-chat", "dtn-discovery", "dtn-metadata-updater"]:
-        run(f"sudo systemctl start {svc}.service 2>/dev/null")
 
-    print("DTN node restarted.")
+def _stop_services(services=None):
+    """Stop systemd services."""
+    svcs = services or ["dtn-discovery", "dtn-chat", "dtnex", "dtn-metadata-updater"]
+    for svc in svcs:
+        run(f"sudo systemctl stop {svc}.service 2>/dev/null", timeout=30)
+        print(f"  stopped {svc}")
+
+
+def _start_services(services=None):
+    """Start systemd services."""
+    svcs = services or ["ionwd", "dtnex", "bpecho", "dtn-chat", "dtn-discovery", "dtn-metadata-updater"]
+    for svc in svcs:
+        run(f"sudo systemctl start {svc}.service 2>/dev/null", timeout=30)
+        # Check if it actually started
+        _, _, rc = run(f"systemctl is-active {svc}.service 2>/dev/null")
+        status = "started" if rc == 0 else "not available"
+        print(f"  {svc}: {status}")
+
+
+def cmd_start(args):
+    """Start ION and/or DTN services."""
+    target = _resolve_service(getattr(args, "service", None))
+
+    if target is None or target == "all":
+        # Start everything
+        _start_ion()
+        print("Starting services...")
+        _start_services()
+        print("DTN node started.")
+    elif target == "ion":
+        _start_ion()
+    else:
+        print(f"Starting {target}...")
+        _start_services([target])
+
+
+def cmd_stop(args):
+    """Stop ION and/or DTN services."""
+    target = _resolve_service(getattr(args, "service", None))
+
+    if target is None or target == "all":
+        # Stop everything
+        print("Stopping services...")
+        _stop_services()
+        _stop_ion()
+        print("DTN node stopped.")
+    elif target == "ion":
+        _stop_ion()
+    else:
+        print(f"Stopping {target}...")
+        _stop_services([target])
+
+
+def cmd_restart(args):
+    """Restart ION and/or DTN services."""
+    import time
+    target = _resolve_service(getattr(args, "service", None))
+
+    if target is None or target == "all":
+        # Full restart
+        print("Stopping services...")
+        _stop_services()
+        _stop_ion()
+        _start_ion()
+        print("Starting services...")
+        _start_services()
+        print("DTN node restarted.")
+    elif target == "ion":
+        _stop_ion()
+        _start_ion()
+    else:
+        print(f"Restarting {target}...")
+        _stop_services([target])
+        time.sleep(1)
+        _start_services([target])
+
+
+def cmd_enable(args):
+    """Enable DTN services to start on boot."""
+    target = _resolve_service(getattr(args, "service", None))
+
+    if target is None or target == "all":
+        print("Enabling all DTN services on boot...")
+        for svc in DTN_SERVICES:
+            run(f"sudo systemctl enable {svc}.service 2>/dev/null", timeout=30)
+            _, _, rc = run(f"systemctl is-enabled {svc}.service 2>/dev/null")
+            status = "enabled" if rc == 0 else "not available"
+            print(f"  {svc}: {status}")
+    elif target == "ion":
+        print("Enabling ionwd (ION watchdog) on boot...")
+        run("sudo systemctl enable ionwd.service 2>/dev/null", timeout=30)
+        _, _, rc = run("systemctl is-enabled ionwd.service 2>/dev/null")
+        print(f"  ionwd: {'enabled' if rc == 0 else 'not available'}")
+    else:
+        run(f"sudo systemctl enable {target}.service 2>/dev/null", timeout=30)
+        _, _, rc = run(f"systemctl is-enabled {target}.service 2>/dev/null")
+        status = "enabled" if rc == 0 else "not available"
+        print(f"{target}: {status}")
+
+
+def cmd_disable(args):
+    """Disable DTN services from starting on boot."""
+    target = _resolve_service(getattr(args, "service", None))
+
+    if target is None or target == "all":
+        print("Disabling all DTN services on boot...")
+        for svc in DTN_SERVICES:
+            run(f"sudo systemctl disable {svc}.service 2>/dev/null", timeout=30)
+            print(f"  {svc}: disabled")
+    elif target == "ion":
+        run("sudo systemctl disable ionwd.service 2>/dev/null", timeout=30)
+        print("ionwd: disabled")
+    else:
+        run(f"sudo systemctl disable {target}.service 2>/dev/null", timeout=30)
+        print(f"{target}: disabled")
 
 
 def cmd_logs(args):
@@ -978,8 +1143,30 @@ def main():
     # plans
     sub.add_parser("plans", help="List ION plans")
 
+    # start
+    st = sub.add_parser("start", help="Start ION and/or a specific service")
+    st.add_argument("service", nargs="?",
+                    help="Service name (ion, dtnex, chat, discovery, metadata, ionwd, bpecho, all)")
+
+    # stop
+    sp = sub.add_parser("stop", help="Stop ION and/or a specific service")
+    sp.add_argument("service", nargs="?",
+                    help="Service name (ion, dtnex, chat, discovery, metadata, ionwd, bpecho, all)")
+
     # restart
-    sub.add_parser("restart", help="Restart ION and DTN services")
+    rs = sub.add_parser("restart", help="Restart ION and/or a specific service")
+    rs.add_argument("service", nargs="?",
+                    help="Service name (ion, dtnex, chat, discovery, metadata, ionwd, bpecho, all)")
+
+    # enable
+    en = sub.add_parser("enable", help="Enable DTN services to start on boot")
+    en.add_argument("service", nargs="?",
+                    help="Service name (ion, dtnex, chat, discovery, metadata, ionwd, bpecho, all)")
+
+    # disable
+    di = sub.add_parser("disable", help="Disable DTN services from starting on boot")
+    di.add_argument("service", nargs="?",
+                    help="Service name (ion, dtnex, chat, discovery, metadata, ionwd, bpecho, all)")
 
     # logs
     lg = sub.add_parser("logs", help="Tail service logs")
@@ -1011,7 +1198,11 @@ def main():
         "contacts": cmd_contacts,
         "nodes": cmd_nodes,
         "plans": cmd_plans,
+        "start": cmd_start,
+        "stop": cmd_stop,
         "restart": cmd_restart,
+        "enable": cmd_enable,
+        "disable": cmd_disable,
         "logs": cmd_logs,
         "config": cmd_config,
     }

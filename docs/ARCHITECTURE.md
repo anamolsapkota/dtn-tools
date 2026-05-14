@@ -157,10 +157,12 @@ BFS Algorithm:
 
 ### Service Number
 
-Terminal chat uses **service number 8** (`ipn:<node>.8`). This is separate from:
+Terminal chat uses **service number 5** (`ipn:<node>.5`). This is separate from:
 - `.1` — general purpose / bpsink
 - `.2` — bpecho (standard)
+- `.3` — bping source
 - `.7` — web-based dtn-chat application
+- `.8` — reserved (legacy terminal chat)
 - `.12161` — bpecho (openipn.org monitoring)
 
 ### Message Format
