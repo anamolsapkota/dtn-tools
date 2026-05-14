@@ -46,11 +46,38 @@ def run(cmd):
 
 
 def get_my_ipn():
-    """Detect local IPN."""
-    out = run("echo 'l' | ionadmin 2>/dev/null")
-    m = re.search(r"own node nbr:\s*(\d+)", out)
-    if m:
-        return m.group(1)
+    """Detect local IPN from various sources."""
+    # Method 1: loopback plan in ipnadmin (most reliable)
+    out = run("echo 'l plan' | ipnadmin 2>/dev/null")
+    for line in out.splitlines():
+        line = line.strip().lstrip(":").strip()
+        m = re.match(r"(\d+)\s+xmit\s+127\.0\.0\.1", line)
+        if m:
+            return m.group(1)
+
+    # Method 2: host*.rc files
+    import glob
+    for f in glob.glob("/home/*/dtn/host*.rc"):
+        m = re.search(r"host(\d+)\.rc", f)
+        if m:
+            return m.group(1)
+
+    # Method 3: ionadmin contacts — find our node by looking at the first
+    # line's "from node" field, since our own contacts are listed first
+    out = run("echo 'l contact' | ionadmin 2>/dev/null")
+    # Find nodes that appear in the "1 <node>" init line of our host.rc
+    # which means they have +360000000 duration contacts (our permanent ones)
+    for line in out.splitlines():
+        m = re.search(r"node\s+(\d+)\s+to\s+node\s+\1\b", line)
+        if m:
+            return m.group(1)
+
+    # Fallback: look at loopback contacts (self→self)
+    for line in out.splitlines():
+        m = re.search(r"node\s+(\d+)\s+to\s+node\s+(\d+)", line)
+        if m and m.group(1) == m.group(2):
+            return m.group(1)
+
     return None
 
 
