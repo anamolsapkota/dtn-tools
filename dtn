@@ -604,10 +604,19 @@ def main():
     nb.add_argument("ip", nargs="?", help="IP address (for add)")
 
     # init
-    init_p = sub.add_parser("init", help="Setup a new DTN node (interactive wizard)")
+    init_p = sub.add_parser("init", help="Setup a new DTN node (full setup wizard)")
     init_p.add_argument("--ipn", help="IPN node number")
     init_p.add_argument("--name", help="Node name")
     init_p.add_argument("--email", help="Contact email")
+    init_p.add_argument("--yes", "-y", action="store_true", help="Non-interactive (accept defaults)")
+    init_p.add_argument("--skip-build", action="store_true", help="Skip ION/dtnex compilation")
+    init_p.add_argument("--skip-services", action="store_true", help="Skip systemd service setup")
+    init_p.add_argument("--gateway-ip", help="Gateway Tailscale IP")
+    init_p.add_argument("--gateway-ipn", help="Gateway IPN number")
+    init_p.add_argument("--dtn-dir", help="DTN working directory")
+    init_p.add_argument("--location", help="Node location")
+    init_p.add_argument("--lat", help="GPS latitude")
+    init_p.add_argument("--lon", help="GPS longitude")
 
     # discover
     disc = sub.add_parser("discover", aliases=["disc"],

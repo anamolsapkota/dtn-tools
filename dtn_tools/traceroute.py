@@ -510,9 +510,49 @@ def diagnose_all():
 
     print()
     if issues_found == 0:
-        print(f"All {len(plans) - 1} direct neighbors OK.")
+        print(f"All {len(plans) - 1} direct neighbor(s) OK.")
     else:
         print(f"{issues_found} of {len(plans) - 1} neighbor(s) with issues.")
+
+    # All nodes in contact graph (not just plans)
+    remote_nodes = all_nodes - set(plans.keys())
+    if remote_nodes:
+        print()
+        print(f"Remote Nodes (via contact graph, no direct plan — {len(remote_nodes)} nodes):")
+        print("-" * 70)
+
+        routable = 0
+        no_route = 0
+        for ipn in sorted(remote_nodes, key=lambda x: int(x)):
+            name = get_node_name(ipn)
+            label = f"ipn:{ipn}" + (f" ({name})" if name else "")
+
+            route = find_cgr_route(my_ipn, ipn, contacts, plans)
+            if route and len(route) > 1:
+                hops = len(route) - 1
+                via = route[1]
+                via_name = get_node_name(via)
+                via_label = f"ipn:{via}" + (f" ({via_name})" if via_name else "")
+                print(f"  [OK] {label} — {hops} hop(s) via {via_label}")
+                routable += 1
+            else:
+                # Check if gateway has contact
+                gw_has = any(s == "268485000" and d == ipn for s, d in contacts)
+                if gw_has:
+                    print(f"  [--] {label} — gateway has contact but no route from here")
+                else:
+                    print(f"  [!!] {label} — no route")
+                no_route += 1
+
+        print()
+        print(f"  {routable} routable, {no_route} unreachable from here.")
+
+    # Grand total
+    print()
+    total_nodes = len(all_nodes)
+    total_routable = (len(plans) - 1) + (routable if remote_nodes else 0)
+    print(f"Total: {total_nodes} nodes known, {total_routable} routable, "
+          f"{total_nodes - total_routable} unreachable.")
 
 
 if __name__ == "__main__":
