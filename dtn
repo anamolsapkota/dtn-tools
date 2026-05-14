@@ -32,7 +32,24 @@ from pathlib import Path
 # Node configuration
 # ---------------------------------------------------------------------------
 
-DTN_DIR = os.environ.get("DTN_DIR", "/home/pi05/dtn")
+def _detect_dtn_dir():
+    """Auto-detect the DTN working directory."""
+    if "DTN_DIR" in os.environ:
+        return os.environ["DTN_DIR"]
+    # Check common locations
+    home = os.path.expanduser("~")
+    for candidate in [
+        os.path.join(home, "dtn"),
+        os.path.join(home, "ion-dtn"),
+        "/opt/dtn",
+    ]:
+        if os.path.isdir(candidate):
+            return candidate
+    # Default to ~/dtn (will be created by dtn init)
+    return os.path.join(home, "dtn")
+
+
+DTN_DIR = _detect_dtn_dir()
 MY_IPN = None  # detected at startup
 HOST_RC = None
 NEIGHBOURS_FILE = os.path.join(DTN_DIR, "scripts", "neighbours.conf")
@@ -78,25 +95,31 @@ def run(cmd, **kwargs):
 # Commands
 # ---------------------------------------------------------------------------
 
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+
+
+def _import_module(name, filename):
+    """Import a module from dtn_tools/ relative to the real script location."""
+    try:
+        mod = __import__(f"dtn_tools.{name}", fromlist=[name])
+        return mod
+    except ImportError:
+        pass
+    mod_path = os.path.join(SCRIPT_DIR, "dtn_tools", filename)
+    if os.path.exists(mod_path):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(f"dtn_tools.{name}", mod_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    print(f"Error: dtn_tools/{filename} not found")
+    sys.exit(1)
+
+
 def cmd_init(args):
     """Run the DTN node setup wizard."""
-    # Import from dtn_tools package or local file
-    try:
-        from dtn_tools.init import run_init
-    except ImportError:
-        # Try relative path
-        init_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dtn_tools", "init.py")
-        if os.path.exists(init_path):
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("dtn_tools.init", init_path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            mod.run_init(args)
-            return
-        else:
-            print("Error: dtn_tools/init.py not found")
-            sys.exit(1)
-    run_init(args)
+    mod = _import_module("init", "init.py")
+    mod.run_init(args)
 
 
 def cmd_status(_args):
@@ -379,38 +402,14 @@ def cmd_send(args):
 
 def cmd_trace(args):
     """Trace route to a destination node."""
-    try:
-        from dtn_tools.traceroute import trace_route
-    except ImportError:
-        tr_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dtn_tools", "traceroute.py")
-        if os.path.exists(tr_path):
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("dtn_tools.traceroute", tr_path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            mod.trace_route(args.dest_ipn)
-            return
-        print("Error: traceroute module not found")
-        sys.exit(1)
-    trace_route(args.dest_ipn)
+    mod = _import_module("traceroute", "traceroute.py")
+    mod.trace_route(args.dest_ipn)
 
 
 def cmd_diagnose(_args):
     """Run full node diagnostics."""
-    try:
-        from dtn_tools.traceroute import diagnose_all
-    except ImportError:
-        tr_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dtn_tools", "traceroute.py")
-        if os.path.exists(tr_path):
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("dtn_tools.traceroute", tr_path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            mod.diagnose_all()
-            return
-        print("Error: traceroute module not found")
-        sys.exit(1)
-    diagnose_all()
+    mod = _import_module("traceroute", "traceroute.py")
+    mod.diagnose_all()
 
 
 def cmd_contacts(_args):
