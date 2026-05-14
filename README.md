@@ -63,6 +63,12 @@ dtn discover
 # Send a message
 dtn send 268485000 "Hello from my DTN node"
 
+# Trace route to a node (identify where issues are)
+dtn trace 268485111
+
+# Run full diagnostics on all neighbors
+dtn diagnose
+
 # View contacts and plans
 dtn contacts
 dtn plans
@@ -110,6 +116,57 @@ Adding a neighbor:
 - Adds a UDP outduct in `bpadmin`
 - Adds a forwarding plan in `ipnadmin`
 - Updates the persistent configuration file
+
+### Route Diagnostics (`dtn trace`, `dtn diagnose`)
+
+Trace the bundle path to any node and identify exactly where issues exist:
+
+```bash
+$ dtn trace 268485111
+
+DTN Route Trace: ipn:268485091 -> ipn:268485111
+============================================================
+
+  Route (2 hops):
+
+  Hop 1: ipn:268485091 -> ipn:268485000 (100.96.108.37:4556) rtt=45ms [has plan]
+         Contact: yes | Range: yes | Return: yes  [OK]
+
+  Hop 2: ipn:268485000 -> ipn:268485111
+         Contact: yes | Range: yes | Return: NO  [!!]
+         ISSUE: NO RETURN CONTACT
+
+============================================================
+  Route to ipn:268485111: ISSUES FOUND
+
+  Hop 2 (ipn:268485000 -> ipn:268485111): NO RETURN CONTACT
+    Fix: ionadmin 'a contact +1 +360000000 268485111 268485000 100000'
+```
+
+Run diagnostics on all neighbors at once:
+
+```bash
+$ dtn diagnose
+
+DTN Node Diagnostics: ipn:268485091
+============================================================
+  ION: Running
+  dtnex: Running (pid 73832)
+  bpecho: Running (pid 76354)
+
+  Plans: 8
+  Contacts: 42
+  Ranges: 42
+
+Neighbor Connectivity:
+------------------------------------------------------------
+  [OK] ipn:268485000 via 100.96.108.37:4556 rtt=45ms
+  [OK] ipn:268485111 via 10.16.16.17:4556 rtt=2ms
+  [!!] ipn:268485099 via 100.72.24.15:4556
+       - unreachable (100.72.24.15)
+
+1 neighbor(s) with issues.
+```
 
 ### Monitoring (`dtn status`)
 

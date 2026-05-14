@@ -376,6 +376,42 @@ def cmd_send(args):
             print(f"Failed: {err}")
 
 
+def cmd_trace(args):
+    """Trace route to a destination node."""
+    try:
+        from dtn_tools.traceroute import trace_route
+    except ImportError:
+        tr_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dtn_tools", "traceroute.py")
+        if os.path.exists(tr_path):
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("dtn_tools.traceroute", tr_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            mod.trace_route(args.dest_ipn)
+            return
+        print("Error: traceroute module not found")
+        sys.exit(1)
+    trace_route(args.dest_ipn)
+
+
+def cmd_diagnose(_args):
+    """Run full node diagnostics."""
+    try:
+        from dtn_tools.traceroute import diagnose_all
+    except ImportError:
+        tr_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dtn_tools", "traceroute.py")
+        if os.path.exists(tr_path):
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("dtn_tools.traceroute", tr_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            mod.diagnose_all()
+            return
+        print("Error: traceroute module not found")
+        sys.exit(1)
+    diagnose_all()
+
+
 def cmd_contacts(_args):
     """List ION contacts."""
     out, _, _ = run("echo 'l contact' | ionadmin 2>/dev/null")
@@ -508,6 +544,13 @@ def main():
     sd.add_argument("dest", help="Destination IPN or 'all'")
     sd.add_argument("message", nargs="*", help="Message text")
 
+    # trace
+    tr = sub.add_parser("trace", help="Trace route to a DTN node and identify issues")
+    tr.add_argument("dest_ipn", help="Destination IPN number")
+
+    # diagnose
+    sub.add_parser("diagnose", help="Run diagnostics on all neighbors and routes")
+
     # contacts
     sub.add_parser("contacts", help="List ION contacts")
 
@@ -541,6 +584,8 @@ def main():
         "discover": cmd_discover,
         "disc": cmd_discover,
         "send": cmd_send,
+        "trace": cmd_trace,
+        "diagnose": cmd_diagnose,
         "contacts": cmd_contacts,
         "plans": cmd_plans,
         "restart": cmd_restart,
