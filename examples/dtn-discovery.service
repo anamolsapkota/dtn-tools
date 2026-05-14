@@ -5,12 +5,12 @@ Wants=dtnex.service
 
 [Service]
 Type=simple
-User=pi05
-WorkingDirectory=/home/pi05/dtn/dtn-discovery
-ExecStart=/usr/bin/python3 /home/pi05/dtn/dtn-discovery/discovery.py
+User=%i
+WorkingDirectory=%h/dtn/dtn-discovery
+ExecStart=/usr/bin/python3 %h/dtn/dtn-discovery/discovery.py
 Restart=on-failure
 RestartSec=30
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/pi05/dtn/ione-code
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=multi-user.target

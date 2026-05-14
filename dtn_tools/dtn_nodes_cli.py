@@ -16,10 +16,16 @@ import os
 import sys
 from datetime import datetime, timezone
 
-DB_PATH = os.environ.get(
-    "DTN_DISCOVERY_DB",
-    "/home/pi05/dtn/dtn-discovery/discovered_nodes.json",
-)
+def _default_discovery_db():
+    home = os.path.expanduser("~")
+    for d in [os.path.join(home, "dtn"), os.path.join(home, "ion-dtn"), "/opt/dtn"]:
+        p = os.path.join(d, "dtn-discovery", "discovered_nodes.json")
+        if os.path.exists(p):
+            return p
+    return os.path.join(home, "dtn", "dtn-discovery", "discovered_nodes.json")
+
+
+DB_PATH = os.environ.get("DTN_DISCOVERY_DB", _default_discovery_db())
 
 
 def load_db():

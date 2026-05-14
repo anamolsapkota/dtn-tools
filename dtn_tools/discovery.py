@@ -35,22 +35,25 @@ CONFIG_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "discovery.conf"),
 )
 
+# Auto-detect DTN working directory
+_HOME_DTN = os.environ.get("DTN_DIR", os.path.join(os.path.expanduser("~"), "dtn"))
+
 DEFAULTS = {
-    "my_ipn": "268485091",
+    "my_ipn": "",
     "gateway_ipn": "268485000",
     "scan_interval": "300",  # seconds between scans
     "openipn_metadata_url": "https://openipn.org/metadata_list.txt",
     "openipn_graph_url": "https://openipn.org/contactGraph.gv",
-    "local_metadata_file": "/home/pi05/dtn/nodesmetadata.txt",
-    "discovered_db": "/home/pi05/dtn/dtn-discovery/discovered_nodes.json",
-    "log_file": "/home/pi05/dtn/dtn-discovery/discovery.log",
+    "local_metadata_file": os.path.join(_HOME_DTN, "nodesmetadata.txt"),
+    "discovered_db": os.path.join(_HOME_DTN, "dtn-discovery", "discovered_nodes.json"),
+    "log_file": os.path.join(_HOME_DTN, "dtn-discovery", "discovery.log"),
     "auto_add_contacts": "true",
     "auto_add_via_gateway": "true",
     "contact_rate": "100000",
     "contact_duration": "360000000",
     "owlt": "1",
     "ipnd_enabled": "true",
-    "ipnd_config": "/home/pi05/dtn/dtn-discovery/ipnd.rc",
+    "ipnd_config": os.path.join(_HOME_DTN, "dtn-discovery", "ipnd.rc"),
     "debug": "false",
 }
 
