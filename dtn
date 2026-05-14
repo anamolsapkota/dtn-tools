@@ -929,11 +929,21 @@ def _start_services(services=None):
     """Start systemd services."""
     svcs = services or ["ionwd", "dtnex", "bpecho", "dtn-chat", "dtn-discovery", "dtn-metadata-updater"]
     for svc in svcs:
+        # Check if service file exists first
+        _, _, exists_rc = run(f"systemctl list-unit-files {svc}.service 2>/dev/null | grep -q {svc}")
+        if exists_rc != 0:
+            print(f"  {svc}: no service file (run 'dtn init' to create)")
+            continue
         run(f"sudo systemctl start {svc}.service 2>/dev/null", timeout=30)
-        # Check if it actually started
         _, _, rc = run(f"systemctl is-active {svc}.service 2>/dev/null")
-        status = "started" if rc == 0 else "not available"
-        print(f"  {svc}: {status}")
+        if rc == 0:
+            print(f"  {svc}: started")
+        else:
+            out, _, _ = run(f"systemctl status {svc}.service 2>/dev/null | head -5")
+            print(f"  {svc}: failed to start")
+            if out:
+                for line in out.split('\n')[:3]:
+                    print(f"    {line.strip()}")
 
 
 def cmd_start(args):
