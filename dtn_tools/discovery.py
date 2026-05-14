@@ -54,6 +54,8 @@ DEFAULTS = {
     "owlt": "1",
     "ipnd_enabled": "true",
     "ipnd_config": os.path.join(_HOME_DTN, "dtn-discovery", "ipnd.rc"),
+    "node_staleness_days": "7",
+    "node_prune_days": "30",
     "debug": "false",
 }
 
@@ -188,7 +190,7 @@ def read_local_metadata(path: str) -> dict[str, DTNNode]:
 
 
 def get_ion_known_nodes() -> set[str]:
-    """Get set of IPN numbers that ION already has plans for."""
+    """Get set of IPN numbers that ION already has contacts/plans for."""
     known = set()
     try:
         result = subprocess.run(
@@ -197,7 +199,6 @@ def get_ion_known_nodes() -> set[str]:
             capture_output=True, text=True, timeout=10,
         )
         for line in result.stdout.splitlines():
-            # Contact lines: "From ... node XXXXXX to node YYYYYY ..."
             m = re.search(r"node\s+(\d+)\s+to\s+node\s+(\d+)", line)
             if m:
                 known.add(m.group(1))
@@ -212,7 +213,6 @@ def get_ion_known_nodes() -> set[str]:
             capture_output=True, text=True, timeout=10,
         )
         for line in result.stdout.splitlines():
-            # Plan lines: ": 268485000 xmit ..." or "268485000 xmit ..."
             line = line.strip().lstrip(":").strip()
             m = re.match(r"(\d{6,})\s+xmit", line)
             if m:
@@ -221,6 +221,27 @@ def get_ion_known_nodes() -> set[str]:
         logging.debug("Could not list ION plans: %s", e)
 
     return known
+
+
+def get_ion_plans() -> dict[str, str]:
+    """Get dict of {ipn: outduct_address} from ION plans."""
+    plans = {}
+    try:
+        result = subprocess.run(
+            ["ipnadmin"],
+            input="l plan\nq\n",
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip().lstrip(":").strip()
+            m = re.match(r"(\d{6,})\s+xmit\s+(\S+)", line)
+            if m:
+                ipn = m.group(1)
+                outduct = m.group(2)
+                plans[ipn] = outduct
+    except Exception as e:
+        logging.debug("Could not list ION plans: %s", e)
+    return plans
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +386,10 @@ def run_scan(cfg: dict, state: dict) -> dict:
         else:
             node.reachable_via = "unknown"
 
+    # Cache outduct info from ION plans
+    ion_plans = get_ion_plans()
+    logging.info("ION plans (outducts): %d", len(ion_plans))
+
     # Update persistent state
     now = datetime.now(timezone.utc).isoformat()
     for ipn, node in all_discovered.items():
@@ -386,6 +411,10 @@ def run_scan(cfg: dict, state: dict) -> dict:
                 existing["neighbors"] = node.neighbors
             existing["reachable_via"] = node.reachable_via
 
+        # Cache outduct address if we have a plan for this node
+        if ipn in ion_plans:
+            state["nodes"][ipn]["outduct"] = ion_plans[ipn]
+
     # Auto-add new gateway-reachable nodes to ION
     if auto_add and auto_gw:
         for ipn, node in all_discovered.items():
@@ -397,16 +426,115 @@ def run_scan(cfg: dict, state: dict) -> dict:
                     state["nodes"][ipn]["added_to_ion"] = True
                     state["nodes"][ipn]["reachable_via"] = "gateway"
 
+    # Prune nodes not seen in prune_days
+    prune_days = int(cfg.get("node_prune_days", "30"))
+    now_dt = datetime.now(timezone.utc)
+    to_prune = []
+    for ipn, info in state["nodes"].items():
+        last_seen = info.get("last_seen", "")
+        if last_seen:
+            try:
+                ls_dt = datetime.fromisoformat(last_seen)
+                if (now_dt - ls_dt).days > prune_days:
+                    to_prune.append(ipn)
+            except ValueError:
+                pass
+    for ipn in to_prune:
+        logging.info("Pruning stale node ipn:%s (not seen in %d days)", ipn, prune_days)
+        del state["nodes"][ipn]
+
     state["last_scan"] = now
     state["stats"]["scans"] = state["stats"].get("scans", 0) + 1
     state["stats"]["total_discovered"] = len(state["nodes"])
 
     logging.info(
-        "Scan complete: %d total nodes known, %d new this scan, %d in ION",
-        len(state["nodes"]), new_count, len(ion_known),
+        "Scan complete: %d total nodes known, %d new this scan, %d in ION, %d pruned",
+        len(state["nodes"]), new_count, len(ion_known), len(to_prune),
     )
     logging.info("=== Discovery scan finished ===")
     return state
+
+
+def reinject_cached_nodes(cfg: dict, state: dict):
+    """Re-inject cached nodes into ION after a restart.
+
+    Compares ION's current contacts with cached nodes. If ION has significantly
+    fewer contacts, re-inject nodes seen within staleness threshold.
+    """
+    staleness_days = int(cfg.get("node_staleness_days", "7"))
+    my_ipn = cfg["my_ipn"]
+    gw_ipn = cfg["gateway_ipn"]
+    now_dt = datetime.now(timezone.utc)
+
+    ion_known = get_ion_known_nodes()
+    ion_count = len(ion_known)
+
+    # Count eligible cached nodes (seen within staleness threshold)
+    eligible = {}
+    for ipn, info in state.get("nodes", {}).items():
+        if ipn in (my_ipn, gw_ipn):
+            continue
+        last_seen = info.get("last_seen", "")
+        if not last_seen:
+            continue
+        try:
+            ls_dt = datetime.fromisoformat(last_seen)
+            if (now_dt - ls_dt).days <= staleness_days:
+                eligible[ipn] = info
+        except ValueError:
+            continue
+
+    if not eligible:
+        logging.info("No cached nodes eligible for re-injection")
+        return
+
+    # Only re-inject if ION is significantly sparse
+    if ion_count >= len(eligible) * 0.5:
+        logging.info(
+            "ION has %d nodes, cache has %d eligible — no re-injection needed",
+            ion_count, len(eligible),
+        )
+        return
+
+    logging.info(
+        "ION has %d nodes but cache has %d eligible — re-injecting contacts",
+        ion_count, len(eligible),
+    )
+
+    injected = 0
+    for ipn, info in eligible.items():
+        if ipn in ion_known:
+            continue
+
+        reachable = info.get("reachable_via", "unknown")
+        outduct = info.get("outduct", "")
+
+        if reachable == "direct" and outduct:
+            # Re-add direct neighbor: contact + range + outduct + plan
+            rate = cfg["contact_rate"]
+            duration = cfg["contact_duration"]
+            owlt = cfg["owlt"]
+            # outduct may be like "100.96.108.37:4556" or "udp/100.96.108.37:4556"
+            ip_port = outduct.split("/")[-1] if "/" in outduct else outduct
+            cmds = [
+                f"a contact +1 +{duration} {my_ipn} {ipn} {rate}",
+                f"a contact +1 +{duration} {ipn} {my_ipn} {rate}",
+                f"a range +1 +{duration} {my_ipn} {ipn} {owlt}",
+                f"a range +1 +{duration} {ipn} {my_ipn} {owlt}",
+            ]
+            ion_command("ionadmin", cmds)
+            ion_command("bpadmin", [f"a outduct udp {ip_port} udpclo"])
+            ion_command("ipnadmin", [f"a plan {ipn} udp/{ip_port}"])
+            logging.info("Re-injected direct neighbor ipn:%s via %s", ipn, ip_port)
+            injected += 1
+
+        elif reachable == "gateway":
+            ok = add_node_via_gateway(ipn, cfg)
+            if ok:
+                logging.info("Re-injected gateway-routed ipn:%s", ipn)
+                injected += 1
+
+    logging.info("Re-injection complete: %d nodes re-injected into ION", injected)
 
 
 def start_ipnd(cfg: dict):
@@ -454,6 +582,12 @@ def main():
 
     # Load persistent state
     state = load_discovered(cfg["discovered_db"])
+
+    # Re-inject cached nodes if ION was restarted (contacts wiped)
+    try:
+        reinject_cached_nodes(cfg, state)
+    except Exception as e:
+        logging.error("Re-injection failed: %s", e, exc_info=True)
 
     # Start IPND for local subnet discovery
     ipnd_proc = start_ipnd(cfg)
