@@ -14,6 +14,7 @@ Usage:
     dtn send <IPN> <message>        Send a DTN bundle message
     dtn send all <message>          Send to all neighbors
     dtn contacts                    List ION contacts
+    dtn nodes                       List all unique nodes in the contact graph
     dtn plans                       List ION plans
     dtn restart                     Restart ION and all DTN services
     dtn logs [service]              Tail logs (dtnex, discovery, ionwd, chat)
@@ -433,6 +434,83 @@ def cmd_contacts(_args):
     print(f"\n{count} contacts total")
 
 
+def _load_discovery_db():
+    """Load discovery DB for node names."""
+    if os.path.exists(DISCOVERY_DB):
+        try:
+            import json
+            with open(DISCOVERY_DB) as f:
+                return json.load(f).get("nodes", {})
+        except Exception:
+            pass
+    return {}
+
+
+def cmd_nodes(_args):
+    """List all unique nodes visible in the ION contact graph."""
+    detect_ipn()
+
+    # Get all nodes from contact graph
+    out, _, _ = run("echo 'l contact' | ionadmin 2>/dev/null")
+    if not out:
+        print("No contacts (is ION running?)")
+        return
+
+    nodes = set()
+    for line in out.splitlines():
+        m = re.search(r"node\s+(\d+)\s+to\s+node\s+(\d+)", line)
+        if m:
+            nodes.add(m.group(1))
+            nodes.add(m.group(2))
+
+    # Get plans (direct neighbors)
+    plans = {}
+    plan_out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+    for line in plan_out.splitlines():
+        line = line.strip().lstrip(":").strip()
+        m = re.match(r"(\d+)\s+xmit\s+(\S+)", line)
+        if m:
+            plans[m.group(1)] = m.group(2)
+
+    # Load discovery DB for names
+    disc = _load_discovery_db()
+
+    # Count contacts per node
+    contact_count = {}
+    for line in out.splitlines():
+        m = re.search(r"node\s+(\d+)\s+to\s+node\s+(\d+)", line)
+        if m:
+            contact_count[m.group(1)] = contact_count.get(m.group(1), 0) + 1
+
+    print(f"All nodes in ION contact graph ({len(nodes)} nodes):")
+    print(f"{'IPN':<20} {'Name':<25} {'Type':<15} {'Contacts':<10}")
+    print("-" * 70)
+
+    for ipn in sorted(nodes, key=lambda x: int(x)):
+        name = ""
+        node_info = disc.get(ipn, {})
+        if node_info and node_info.get("name"):
+            name = node_info["name"]
+
+        if ipn == MY_IPN:
+            ntype = "local"
+        elif ipn in plans and plans[ipn].startswith("127."):
+            ntype = "local"
+        elif ipn in plans:
+            ntype = "neighbor"
+        else:
+            ntype = "discovered"
+
+        contacts = contact_count.get(ipn, 0)
+        print(f"  ipn:{ipn:<14} {name:<25} {ntype:<15} {contacts}")
+
+    # Summary
+    local = sum(1 for n in nodes if n == MY_IPN or (n in plans and plans.get(n, "").startswith("127.")))
+    neighbors = sum(1 for n in nodes if n in plans and not plans.get(n, "").startswith("127.") and n != MY_IPN)
+    discovered = len(nodes) - local - neighbors
+    print(f"\n  {local} local, {neighbors} neighbors (with plans), {discovered} discovered (via contact graph)")
+
+
 def cmd_plans(_args):
     """List ION plans."""
     list_neighbors()
@@ -554,6 +632,9 @@ def main():
     # contacts
     sub.add_parser("contacts", help="List ION contacts")
 
+    # nodes
+    sub.add_parser("nodes", help="List all unique nodes in the contact graph")
+
     # plans
     sub.add_parser("plans", help="List ION plans")
 
@@ -587,6 +668,7 @@ def main():
         "trace": cmd_trace,
         "diagnose": cmd_diagnose,
         "contacts": cmd_contacts,
+        "nodes": cmd_nodes,
         "plans": cmd_plans,
         "restart": cmd_restart,
         "logs": cmd_logs,
