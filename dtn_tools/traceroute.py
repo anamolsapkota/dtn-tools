@@ -7,17 +7,25 @@ Analyzes the ION contact graph, plans, and network connectivity to determine:
 2. Which hops have active contacts/ranges
 3. Which hops are reachable (UDP connectivity)
 4. Where the route breaks down
+5. End-to-end DTN round-trip time via bping
 
 Usage (called from main dtn CLI):
     dtn trace <destination_ipn>
     dtn diagnose
 """
 
+import json
 import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
+
+DISCOVERY_DB = os.environ.get(
+    "DTN_DISCOVERY_DB",
+    "/home/pi05/dtn/dtn-discovery/discovered_nodes.json",
+)
 
 
 @dataclass
@@ -34,11 +42,11 @@ class Hop:
     issue: str = ""
 
 
-def run(cmd):
+def run(cmd, timeout=30):
     """Run a shell command and return stdout."""
     try:
         result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=30
+            cmd, shell=True, capture_output=True, text=True, timeout=timeout
         )
         return result.stdout.strip()
     except Exception:
@@ -62,17 +70,8 @@ def get_my_ipn():
         if m:
             return m.group(1)
 
-    # Method 3: ionadmin contacts — find our node by looking at the first
-    # line's "from node" field, since our own contacts are listed first
+    # Method 3: loopback contacts (self→self)
     out = run("echo 'l contact' | ionadmin 2>/dev/null")
-    # Find nodes that appear in the "1 <node>" init line of our host.rc
-    # which means they have +360000000 duration contacts (our permanent ones)
-    for line in out.splitlines():
-        m = re.search(r"node\s+(\d+)\s+to\s+node\s+\1\b", line)
-        if m:
-            return m.group(1)
-
-    # Fallback: look at loopback contacts (self→self)
     for line in out.splitlines():
         m = re.search(r"node\s+(\d+)\s+to\s+node\s+(\d+)", line)
         if m and m.group(1) == m.group(2):
@@ -115,8 +114,22 @@ def get_plans():
     return plans
 
 
+def get_node_name(ipn):
+    """Look up a friendly name for a node from the discovery DB."""
+    if os.path.exists(DISCOVERY_DB):
+        try:
+            with open(DISCOVERY_DB) as f:
+                data = json.load(f)
+            node = data.get("nodes", {}).get(ipn)
+            if node and node.get("name"):
+                return node["name"]
+        except Exception:
+            pass
+    return None
+
+
 def check_udp_reachable(ip_port):
-    """Check if a UDP endpoint is reachable via basic ping."""
+    """Check if a UDP endpoint is reachable via ICMP ping."""
     ip = ip_port.split(":")[0]
     if ip in ("127.0.0.1", "0.0.0.0"):
         return True, 0.0
@@ -127,27 +140,72 @@ def check_udp_reachable(ip_port):
     return False, -1
 
 
+def bping_rtt(my_ipn, dest_ipn, timeout=10):
+    """Send a DTN bping and measure round-trip time. Returns (success, rtt_ms).
+
+    Tries bpecho on common service numbers (.2, .1) since different nodes
+    may configure bpecho on different endpoints.
+    """
+    src_eid = f"ipn:{my_ipn}.3"
+
+    for svc in (2, 1):
+        dst_eid = f"ipn:{dest_ipn}.{svc}"
+        out = run(
+            f"timeout {timeout} bping -c 1 -q 5 {src_eid} {dst_eid} 2>&1",
+            timeout=timeout + 5,
+        )
+
+        # Parse bping output: "time=1.234567 s"
+        m = re.search(r"time=(\S+)\s+s", out)
+        if m:
+            rtt_s = float(m.group(1))
+            return True, rtt_s * 1000.0  # convert to ms
+
+        # Check for bundle loss
+        loss_m = re.search(r"(\d+\.?\d*)%\s+bundle loss", out)
+        if loss_m and float(loss_m.group(1)) == 0:
+            return True, 0.0
+
+    return False, -1
+
+
 def find_cgr_route(my_ipn, dest_ipn, contacts, plans):
     """
     Compute the likely CGR route from my_ipn to dest_ipn.
 
-    ION's CGR uses the contact graph to find the best path. We simulate
-    a simplified version by finding the shortest path in the contact graph.
+    Uses BFS on the contact graph. Prefers paths through nodes we have
+    direct plans for (i.e. first hop must be a node with a plan).
     """
     # Build adjacency from contacts
     adj = {}
     for src, dst in contacts:
         adj.setdefault(src, set()).add(dst)
 
-    # BFS from my_ipn to dest_ipn
     if my_ipn == dest_ipn:
         return [my_ipn]
 
+    # Direct contact?
+    if dest_ipn in adj.get(my_ipn, set()):
+        return [my_ipn, dest_ipn]
+
+    # BFS — but only start through nodes we have plans for (first hop constraint)
+    # ION can only send to nodes it has an outduct/plan for
+    plan_nodes = set(plans.keys()) - {my_ipn}
+
     visited = {my_ipn}
-    queue = [(my_ipn, [my_ipn])]
+    queue = []
+
+    # Seed BFS with reachable first-hop nodes that have contacts to other nodes
+    for first_hop in adj.get(my_ipn, set()):
+        if first_hop == dest_ipn:
+            return [my_ipn, dest_ipn]
+        if first_hop in plan_nodes:
+            visited.add(first_hop)
+            queue.append((first_hop, [my_ipn, first_hop]))
+
     while queue:
         current, path = queue.pop(0)
-        for neighbor in adj.get(current, []):
+        for neighbor in adj.get(current, set()):
             if neighbor == dest_ipn:
                 return path + [neighbor]
             if neighbor not in visited:
@@ -157,6 +215,14 @@ def find_cgr_route(my_ipn, dest_ipn, contacts, plans):
     return []  # No route found
 
 
+def format_node(ipn):
+    """Format a node with name if available."""
+    name = get_node_name(ipn)
+    if name:
+        return f"ipn:{ipn} ({name})"
+    return f"ipn:{ipn}"
+
+
 def trace_route(dest_ipn):
     """Trace the DTN route to a destination and identify issues."""
     my_ipn = get_my_ipn()
@@ -164,8 +230,14 @@ def trace_route(dest_ipn):
         print("Error: Could not detect local IPN. Is ION running?")
         return
 
-    print(f"DTN Route Trace: ipn:{my_ipn} -> ipn:{dest_ipn}")
-    print("=" * 60)
+    dest_name = get_node_name(dest_ipn)
+    my_name = get_node_name(my_ipn)
+
+    src_label = f"ipn:{my_ipn}" + (f" ({my_name})" if my_name else "")
+    dst_label = f"ipn:{dest_ipn}" + (f" ({dest_name})" if dest_name else "")
+
+    print(f"DTN Route Trace: {src_label} -> {dst_label}")
+    print("=" * 70)
 
     contacts = get_contacts()
     ranges = get_ranges()
@@ -175,35 +247,57 @@ def trace_route(dest_ipn):
     route = find_cgr_route(my_ipn, dest_ipn, contacts, plans)
 
     if not route:
-        print(f"\n  NO ROUTE FOUND to ipn:{dest_ipn}")
+        print(f"\n  NO ROUTE FOUND to {dst_label}")
         print()
-        print("  Possible causes:")
+        print("  Diagnosis:")
 
-        # Check if we have a contact to the destination
+        # Check if we have any contact to the destination
         has_contact = any(
             (s == my_ipn and d == dest_ipn) or (s == dest_ipn and d == my_ipn)
             for s, d in contacts
         )
         if not has_contact:
-            print(f"  - No contact between ipn:{my_ipn} and ipn:{dest_ipn}")
-            print(f"    Fix: ionadmin 'a contact +1 +360000000 {my_ipn} {dest_ipn} 100000'")
+            print(f"  [!!] No contact between ipn:{my_ipn} and ipn:{dest_ipn}")
+            print(f"       Fix: ionadmin 'a contact +1 +360000000 {my_ipn} {dest_ipn} 100000'")
+            print(f"            ionadmin 'a contact +1 +360000000 {dest_ipn} {my_ipn} 100000'")
+            print(f"            ionadmin 'a range +1 +360000000 {my_ipn} {dest_ipn} 1'")
+            print(f"            ionadmin 'a range +1 +360000000 {dest_ipn} {my_ipn} 1'")
 
         # Check if gateway has contact
         gw_ipn = "268485000"
         gw_to_dest = any(s == gw_ipn and d == dest_ipn for s, d in contacts)
         dest_to_gw = any(s == dest_ipn and d == gw_ipn for s, d in contacts)
-        if not gw_to_dest:
-            print(f"  - Gateway (ipn:{gw_ipn}) has no contact to ipn:{dest_ipn}")
-            print(f"    This means CGR can't route through the gateway")
-        if not dest_to_gw:
-            print(f"  - ipn:{dest_ipn} has no contact to gateway (ipn:{gw_ipn})")
+        has_gw_plan = gw_ipn in plans
 
-        # Check plan
-        if dest_ipn not in plans and gw_ipn not in plans:
-            print(f"  - No plan for ipn:{dest_ipn} or gateway")
+        if not has_gw_plan:
+            print(f"  [!!] No plan for gateway ipn:{gw_ipn}")
+        elif not gw_to_dest:
+            print(f"  [!!] Gateway (ipn:{gw_ipn}) has no contact to ipn:{dest_ipn}")
+            print(f"       CGR cannot route through the gateway to this node")
+            print(f"       The destination node may need to exchange contacts via dtnex")
+        if not dest_to_gw:
+            print(f"  [!!] ipn:{dest_ipn} has no return contact to gateway")
+
+        # Check discovered nodes for hints
+        if os.path.exists(DISCOVERY_DB):
+            try:
+                with open(DISCOVERY_DB) as f:
+                    disc = json.load(f)
+                node_info = disc.get("nodes", {}).get(dest_ipn)
+                if node_info:
+                    via = node_info.get("reachable_via", "unknown")
+                    print(f"\n  Discovery info: node was found via '{via}' source")
+                    if via == "unknown":
+                        print(f"  This node exists on the network but has no known route from here")
+                else:
+                    print(f"\n  Node ipn:{dest_ipn} was NOT found by the discovery daemon")
+                    print(f"  It may not exist or may not be exchanging metadata via dtnex")
+            except Exception:
+                pass
         return
 
-    print(f"\n  Route ({len(route)-1} hops):")
+    print(f"\n  Route: {len(route)-1} hop(s)")
+    print(f"  Path:  {' -> '.join(format_node(n) for n in route)}")
     print()
 
     hops = []
@@ -221,18 +315,13 @@ def trace_route(dest_ipn):
         # Check range
         hop.has_range = any(s == src and d == dst for s, d in ranges)
 
-        # Check plan (only relevant for first hop from our node)
+        # Check plan (relevant for first hop — our node must have a plan to send)
         if src == my_ipn:
             hop.has_plan = dst in plans
             if hop.has_plan:
                 hop.outduct_ip = plans[dst]
-        elif i == 0:
-            # For intermediate hops, check if we have a plan to the next hop
-            hop.has_plan = dst in plans
-            if hop.has_plan:
-                hop.outduct_ip = plans[dst]
 
-        # Check UDP reachability (only for direct neighbors we have plans for)
+        # Check UDP reachability (only for nodes we have plans for)
         if dst in plans:
             hop.outduct_ip = plans[dst]
             reachable, rtt = check_udp_reachable(hop.outduct_ip)
@@ -246,7 +335,7 @@ def trace_route(dest_ipn):
         if not hop.has_range:
             issues.append("NO RANGE")
         if src == my_ipn and not hop.has_plan:
-            issues.append("NO PLAN")
+            issues.append("NO PLAN (first hop needs outduct)")
         if hop.outduct_ip and not hop.udp_reachable:
             issues.append("UNREACHABLE")
         if not reverse_contact:
@@ -259,26 +348,48 @@ def trace_route(dest_ipn):
         hops.append(hop)
 
         # Display hop
-        status = "OK" if not hop.issue else hop.issue
-        ip_info = f" ({hop.outduct_ip})" if hop.outduct_ip else ""
-        rtt_info = f" rtt={hop.rtt_ms:.0f}ms" if hop.rtt_ms >= 0 else ""
-        plan_info = " [has plan]" if hop.has_plan else ""
+        dst_name = get_node_name(dst)
+        dst_label = f"ipn:{dst}" + (f" ({dst_name})" if dst_name else "")
+        ip_info = f" via {hop.outduct_ip}" if hop.outduct_ip else ""
+        rtt_info = f" icmp={hop.rtt_ms:.0f}ms" if hop.rtt_ms >= 0 else ""
+        plan_info = " [plan]" if hop.has_plan else ""
 
-        marker = "  [OK]" if not hop.issue else "  [!!]"
-        print(f"  Hop {i+1}: ipn:{src} -> ipn:{dst}{ip_info}{rtt_info}{plan_info}")
+        marker = "[OK]" if not hop.issue else "[!!]"
+        print(f"  {marker} Hop {i+1}: ipn:{src} -> {dst_label}{ip_info}{rtt_info}{plan_info}")
         print(f"         Contact: {'yes' if hop.has_contact else 'NO'} | "
               f"Range: {'yes' if hop.has_range else 'NO'} | "
-              f"Return: {'yes' if reverse_contact else 'NO'}{marker}")
+              f"Return: {'yes' if reverse_contact else 'NO'}")
         if hop.issue:
             print(f"         ISSUE: {hop.issue}")
         print()
 
-    # Summary
-    print("=" * 60)
-    if all_ok:
-        print(f"  Route to ipn:{dest_ipn}: ALL HOPS OK")
+    # End-to-end DTN bping
+    bping_ok = False
+    print("-" * 70)
+    blocking_issues = any(
+        "NO PLAN" in h.issue or "UNREACHABLE" in h.issue or "NO CONTACT" in h.issue
+        for h in hops
+    )
+    if not blocking_issues:
+        print(f"  DTN bping ipn:{my_ipn} -> ipn:{dest_ipn} ...", end=" ", flush=True)
+        ok, rtt = bping_rtt(my_ipn, dest_ipn)
+        if ok:
+            print(f"OK  rtt={rtt:.1f}ms ({rtt/1000:.2f}s)")
+            bping_ok = True
+        else:
+            print(f"no response (remote bpecho may not be running)")
     else:
-        print(f"  Route to ipn:{dest_ipn}: ISSUES FOUND")
+        print(f"  DTN bping: SKIPPED (route has blocking issues)")
+
+    # Summary
+    print()
+    print("=" * 70)
+    if all_ok and bping_ok:
+        print(f"  Route to {dst_label}: ALL OK (bping verified)")
+    elif all_ok:
+        print(f"  Route to {dst_label}: ROUTE OK (bping unverified — remote bpecho may be down)")
+    else:
+        print(f"  Route to {dst_label}: ISSUES FOUND")
         print()
         for i, hop in enumerate(hops):
             if hop.issue:
@@ -306,8 +417,15 @@ def diagnose_all():
     contacts = get_contacts()
     ranges = get_ranges()
 
+    # Count unique nodes in contact graph
+    all_nodes = set()
+    for s, d in contacts:
+        all_nodes.add(s)
+        all_nodes.add(d)
+    all_nodes.discard(my_ipn)
+
     print(f"DTN Node Diagnostics: ipn:{my_ipn}")
-    print("=" * 60)
+    print("=" * 70)
 
     # Check ION status
     out = run("bpversion 2>/dev/null")
@@ -315,29 +433,48 @@ def diagnose_all():
 
     # Check dtnex
     out = run("pgrep -x dtnex 2>/dev/null")
-    print(f"  dtnex: {'Running (pid ' + out + ')' if out else 'NOT RUNNING'}")
+    pids = out.replace("\n", ", ") if out else ""
+    print(f"  dtnex: {'Running (pid ' + pids + ')' if out else 'NOT RUNNING'}")
 
     # Check bpecho
     out = run("pgrep -x bpecho 2>/dev/null")
     print(f"  bpecho: {'Running (pid ' + out + ')' if out else 'NOT RUNNING'}")
 
+    # Check discovery
+    out = run("pgrep -f 'discovery.py' 2>/dev/null")
+    print(f"  discovery: {'Running (pid ' + out.split()[0] + ')' if out else 'NOT RUNNING'}")
+
     print()
-    print(f"  Plans: {len(plans)}")
-    print(f"  Contacts: {len(contacts)}")
-    print(f"  Ranges: {len(ranges)}")
+    print(f"  Plans (direct neighbors): {len(plans) - 1}")  # minus loopback
+    print(f"  Contacts (edges):         {len(contacts)}")
+    print(f"  Ranges:                   {len(ranges)}")
+    print(f"  Unique nodes in graph:    {len(all_nodes)}")
+
+    # Discovered nodes
+    disc_count = 0
+    if os.path.exists(DISCOVERY_DB):
+        try:
+            with open(DISCOVERY_DB) as f:
+                disc_count = len(json.load(f).get("nodes", {}))
+        except Exception:
+            pass
+    print(f"  Discovered nodes:         {disc_count}")
+
     print()
 
     # Check each direct neighbor
-    print("Neighbor Connectivity:")
-    print("-" * 60)
+    print("Direct Neighbors (with plans):")
+    print("-" * 70)
 
     issues_found = 0
-    for ipn, outduct in plans.items():
+    for ipn, outduct in sorted(plans.items()):
         if ipn == my_ipn:
             continue
 
         ip = outduct.split(":")[0]
         issues = []
+        name = get_node_name(ipn)
+        label = f"ipn:{ipn}" + (f" ({name})" if name else "")
 
         # Check contact
         has_fwd = any(s == my_ipn and d == ipn for s, d in contacts)
@@ -356,11 +493,10 @@ def diagnose_all():
         if not reachable:
             issues.append(f"unreachable ({ip})")
 
-        status = "OK" if not issues else "ISSUES: " + ", ".join(issues)
-        rtt_str = f" rtt={rtt:.0f}ms" if rtt >= 0 else ""
+        rtt_str = f" icmp={rtt:.0f}ms" if rtt >= 0 else ""
         marker = "[OK]" if not issues else "[!!]"
 
-        print(f"  {marker} ipn:{ipn} via {outduct}{rtt_str}")
+        print(f"  {marker} {label} via {outduct}{rtt_str}")
         if issues:
             issues_found += 1
             for issue in issues:
@@ -368,9 +504,9 @@ def diagnose_all():
 
     print()
     if issues_found == 0:
-        print("All neighbors OK.")
+        print(f"All {len(plans) - 1} direct neighbors OK.")
     else:
-        print(f"{issues_found} neighbor(s) with issues.")
+        print(f"{issues_found} of {len(plans) - 1} neighbor(s) with issues.")
 
 
 if __name__ == "__main__":
