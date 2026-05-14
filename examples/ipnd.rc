@@ -1,0 +1,42 @@
+## IPND configuration for Pi05 (ipn:268485091)
+## Beacon-based neighbor discovery on local subnets
+
+# Initialize
+1
+
+# Log to ion.log
+e 1
+
+# Local EID
+m eid ipn:268485091.0
+
+# Beacon port
+m port 4550
+
+# Announce our beacon period and EID
+m announce period 1
+m announce eid 1
+
+# Beacon intervals (seconds)
+m interval unicast 10
+m interval multicast 30
+m interval broadcast 30
+
+# Multicast TTL
+m multicast ttl 255
+
+# Service advertisement: UDP CLA on port 4556
+m svcdef 128 CLAInfo IP:CLA-TCP-v4 Port:CLA-TCP-v4
+a svcadv CLA-UDP-v4 IP:10.16.16.169 Port:4556
+
+# Listen on all interfaces for incoming beacons
+a listen 0.0.0.0
+
+# Send beacons on ZeroTier subnet (where Echo lives)
+a destination 10.16.16.255
+
+# Send beacons on Tailscale subnet (where other DTN nodes live)
+a destination 100.75.250.255
+
+# Start
+s

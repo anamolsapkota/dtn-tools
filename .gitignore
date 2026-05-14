@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Runtime data
+*.db
+*.json
+!examples/*.json
+discovery.log
+ion.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ION build artifacts
+*.o
+*.lo
+*.la
+.libs/
+.deps/

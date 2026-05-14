@@ -1,0 +1,559 @@
+#!/usr/bin/env python3
+"""
+dtn — unified CLI for managing a DTN node on ION-DTN.
+
+Usage:
+    dtn status                      Show node and service status
+    dtn neighbors                   List configured neighbors
+    dtn neighbors add <IPN> <IP>    Add a neighbor (IPN number + Tailscale/ZeroTier IP)
+    dtn neighbors remove <IPN>      Remove a neighbor
+    dtn neighbors ping [IPN]        Ping one or all neighbors
+    dtn discover                    List discovered nodes (from dtn-discovery)
+    dtn discover summary            Show discovery summary
+    dtn discover search <query>     Search discovered nodes
+    dtn send <IPN> <message>        Send a DTN bundle message
+    dtn send all <message>          Send to all neighbors
+    dtn contacts                    List ION contacts
+    dtn plans                       List ION plans
+    dtn restart                     Restart ION and all DTN services
+    dtn logs [service]              Tail logs (dtnex, discovery, ionwd, chat)
+    dtn config                      Show current node configuration
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Node configuration
+# ---------------------------------------------------------------------------
+
+DTN_DIR = os.environ.get("DTN_DIR", "/home/pi05/dtn")
+MY_IPN = None  # detected at startup
+HOST_RC = None
+NEIGHBOURS_FILE = os.path.join(DTN_DIR, "scripts", "neighbours.conf")
+DISCOVERY_DB = os.path.join(DTN_DIR, "dtn-discovery", "discovered_nodes.json")
+DISCOVERY_SCRIPT = os.path.join(DTN_DIR, "dtn-discovery", "dtn-nodes")
+ADD_NEIGHBOUR_SCRIPT = os.path.join(DTN_DIR, "scripts", "add-neighbour.sh")
+
+
+def detect_ipn():
+    """Detect local IPN from running ION."""
+    global MY_IPN, HOST_RC
+    try:
+        result = subprocess.run(
+            ["ionadmin"], input="l\nq\n",
+            capture_output=True, text=True, timeout=5,
+        )
+        m = re.search(r"own node nbr:\s*(\d+)", result.stdout)
+        if m:
+            MY_IPN = m.group(1)
+    except Exception:
+        pass
+
+    if not MY_IPN:
+        # Fallback: check host*.rc files
+        for f in Path(DTN_DIR).glob("host*.rc"):
+            m = re.search(r"host(\d+)\.rc", f.name)
+            if m:
+                MY_IPN = m.group(1)
+                break
+    if not MY_IPN:
+        MY_IPN = "268485091"
+
+    HOST_RC = os.path.join(DTN_DIR, f"host{MY_IPN}.rc")
+
+
+def run(cmd, **kwargs):
+    """Run a shell command and return output."""
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30, **kwargs)
+    return result.stdout.strip(), result.stderr.strip(), result.returncode
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_init(args):
+    """Run the DTN node setup wizard."""
+    # Import from dtn_tools package or local file
+    try:
+        from dtn_tools.init import run_init
+    except ImportError:
+        # Try relative path
+        init_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dtn_tools", "init.py")
+        if os.path.exists(init_path):
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("dtn_tools.init", init_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            mod.run_init(args)
+            return
+        else:
+            print("Error: dtn_tools/init.py not found")
+            sys.exit(1)
+    run_init(args)
+
+
+def cmd_status(_args):
+    """Show node and service status."""
+    detect_ipn()
+    print(f"DTN Node: ipn:{MY_IPN}")
+    print(f"DTN Dir:  {DTN_DIR}")
+    print(f"Host RC:  {HOST_RC}")
+    print()
+
+    # ION version
+    out, _, _ = run("bpversion 2>/dev/null || echo 'ION not running'")
+    print(f"ION Version: {out}")
+
+    # ION status
+    out, _, rc = run("echo 'l' | ionadmin 2>/dev/null | head -3")
+    if rc == 0 and out:
+        print(f"ION Status: Running")
+    else:
+        print(f"ION Status: NOT RUNNING")
+
+    print()
+
+    # Service status
+    services = ["ionwd", "dtnex", "bpecho", "dtn-chat", "dtn-discovery", "dtn-metadata-updater"]
+    print(f"{'Service':<25} {'Status':<12} {'PID'}")
+    print("-" * 55)
+    for svc in services:
+        out, _, rc = run(f"systemctl is-active {svc}.service 2>/dev/null")
+        status = out if rc == 0 else "inactive"
+        pid = ""
+        if status == "active":
+            p_out, _, _ = run(f"systemctl show {svc}.service --property=MainPID --value 2>/dev/null")
+            pid = p_out
+        print(f"{svc:<25} {status:<12} {pid}")
+
+    print()
+
+    # Bundle stats
+    out, _, _ = run("echo 'w' | bpadmin 2>/dev/null | head -5")
+    if out:
+        print("Bundle Protocol Stats:")
+        for line in out.splitlines():
+            line = line.strip()
+            if line and not line.startswith(":"):
+                print(f"  {line}")
+
+
+def cmd_neighbors(args):
+    """List, add, or remove neighbors."""
+    detect_ipn()
+
+    if args.action == "add":
+        if not args.ipn or not args.ip:
+            print("Usage: dtn neighbors add <IPN> <IP>")
+            sys.exit(1)
+        add_neighbor(args.ipn, args.ip)
+    elif args.action == "remove":
+        if not args.ipn:
+            print("Usage: dtn neighbors remove <IPN>")
+            sys.exit(1)
+        remove_neighbor(args.ipn)
+    elif args.action == "ping":
+        ping_neighbors(args.ipn)
+    else:
+        list_neighbors()
+
+
+def list_neighbors():
+    """List configured neighbors from ION plans."""
+    out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+    if not out:
+        print("No plans configured (is ION running?)")
+        return
+
+    print(f"{'IPN':<14} {'Outduct':<30} {'Rate'}")
+    print("-" * 60)
+    for line in out.splitlines():
+        line = line.strip().lstrip(":").strip()
+        if not line or line.startswith("Stopping"):
+            continue
+        # Format: "268485000 xmit 100.96.108.37:4556 xmit rate: 0"
+        m = re.match(r"(\d+)\s+xmit\s+(\S+)\s+xmit rate:\s*(\d+)", line)
+        if m:
+            ipn, outduct, rate = m.groups()
+            print(f"ipn:{ipn:<10} {outduct:<30} {rate}")
+
+
+def add_neighbor(ipn, ip):
+    """Add a new neighbor to ION config and running instance."""
+    detect_ipn()
+    print(f"Adding neighbor ipn:{ipn} at {ip}...")
+
+    # Use the existing add-neighbour.sh if available
+    if os.path.exists(ADD_NEIGHBOUR_SCRIPT):
+        out, err, rc = run(f"bash {ADD_NEIGHBOUR_SCRIPT} {ipn} {ip}")
+        if rc == 0:
+            print(out)
+        else:
+            print(f"Script failed: {err}")
+            print("Falling back to direct ION commands...")
+            _add_neighbor_direct(ipn, ip)
+    else:
+        _add_neighbor_direct(ipn, ip)
+
+
+def _add_neighbor_direct(ipn, ip):
+    """Add neighbor directly via ION admin commands."""
+    port = "4556"
+    rate = "100000"
+    duration = "360000000"
+
+    # Add contacts and ranges
+    ion_cmds = f"""a contact +1 +{duration} {MY_IPN} {ipn} {rate}
+a contact +1 +{duration} {ipn} {MY_IPN} {rate}
+a range +1 +{duration} {MY_IPN} {ipn} 1
+a range +1 +{duration} {ipn} {MY_IPN} 1
+q
+"""
+    out, err, rc = run(f"echo '{ion_cmds}' | ionadmin 2>&1")
+    if rc != 0:
+        print(f"ionadmin error: {err}")
+        return
+
+    # Add outduct
+    bp_cmds = f"a outduct udp {ip}:{port} udpclo\nq\n"
+    run(f"echo '{bp_cmds}' | bpadmin 2>&1")
+
+    # Add plan
+    ipn_cmds = f"a plan {ipn} udp/{ip}:{port}\nq\n"
+    run(f"echo '{ipn_cmds}' | ipnadmin 2>&1")
+
+    # Update neighbours.conf
+    if os.path.exists(NEIGHBOURS_FILE):
+        with open(NEIGHBOURS_FILE, "a") as f:
+            f.write(f"node-{ipn} {ipn} {ip}\n")
+
+    print(f"Added neighbor ipn:{ipn} at {ip}:{port}")
+    print("Contacts, outduct, and plan configured in running ION.")
+
+
+def remove_neighbor(ipn):
+    """Remove a neighbor from the running ION instance."""
+    detect_ipn()
+    print(f"Removing neighbor ipn:{ipn}...")
+
+    # Get the current plan to find the IP
+    out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+    ip = None
+    for line in out.splitlines():
+        line = line.strip().lstrip(":").strip()
+        m = re.match(rf"{ipn}\s+xmit\s+(\S+)", line)
+        if m:
+            ip = m.group(1)
+            break
+
+    # Delete contacts
+    ion_cmds = f"""d contact +1 {MY_IPN} {ipn}
+d contact +1 {ipn} {MY_IPN}
+d range +1 {MY_IPN} {ipn}
+d range +1 {ipn} {MY_IPN}
+q
+"""
+    run(f"echo '{ion_cmds}' | ionadmin 2>&1")
+
+    # Delete plan
+    ipn_cmds = f"d plan {ipn}\nq\n"
+    run(f"echo '{ipn_cmds}' | ipnadmin 2>&1")
+
+    # Delete outduct if we found the IP
+    if ip:
+        bp_cmds = f"d outduct udp {ip}\nq\n"
+        run(f"echo '{bp_cmds}' | bpadmin 2>&1")
+
+    # Remove from neighbours.conf
+    if os.path.exists(NEIGHBOURS_FILE):
+        lines = []
+        with open(NEIGHBOURS_FILE) as f:
+            for line in f:
+                if ipn not in line:
+                    lines.append(line)
+        with open(NEIGHBOURS_FILE, "w") as f:
+            f.writelines(lines)
+
+    print(f"Removed neighbor ipn:{ipn}")
+    print("Note: To persist, also remove from host*.rc and restart ION.")
+
+
+def ping_neighbors(target_ipn=None):
+    """Ping one or all neighbors."""
+    detect_ipn()
+    src = f"ipn:{MY_IPN}.3"
+
+    # Get plans
+    out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+    targets = []
+    for line in out.splitlines():
+        line = line.strip().lstrip(":").strip()
+        m = re.match(r"(\d+)\s+xmit", line)
+        if m:
+            n = m.group(1)
+            if n != MY_IPN:
+                if target_ipn and n != target_ipn:
+                    continue
+                targets.append(n)
+
+    if not targets:
+        print("No neighbors to ping.")
+        return
+
+    for ipn in targets:
+        dest = f"ipn:{ipn}.12161"
+        print(f"Pinging ipn:{ipn} ({src} -> {dest})...", end=" ", flush=True)
+        out, err, rc = run(f"timeout 10 bping -c 1 -i 1 {src} {dest} 2>&1")
+        if "bundle loss, time" in out:
+            # Parse RTT
+            m = re.search(r"time=(\S+)\s+s", out)
+            loss_m = re.search(r"(\d+\.?\d*)%\s+bundle loss", out)
+            rtt = f"{float(m.group(1))*1000:.0f}ms" if m else "?"
+            loss = loss_m.group(1) if loss_m else "?"
+            if float(loss_m.group(1) if loss_m else 100) == 0:
+                print(f"UP (rtt={rtt}, loss={loss}%)")
+            else:
+                print(f"DOWN (loss={loss}%)")
+        else:
+            print("DOWN (timeout)")
+
+
+def cmd_discover(args):
+    """Query discovered nodes."""
+    if not os.path.exists(DISCOVERY_SCRIPT):
+        print(f"Discovery tool not found: {DISCOVERY_SCRIPT}")
+        print("Install dtn-discovery first.")
+        sys.exit(1)
+
+    if args.subaction == "summary":
+        os.execvp("python3", ["python3", DISCOVERY_SCRIPT, "--summary"])
+    elif args.subaction == "search":
+        if not args.query:
+            print("Usage: dtn discover search <query>")
+            sys.exit(1)
+        os.execvp("python3", ["python3", DISCOVERY_SCRIPT, "--search", args.query])
+    else:
+        os.execvp("python3", ["python3", DISCOVERY_SCRIPT])
+
+
+def cmd_send(args):
+    """Send a DTN bundle message."""
+    detect_ipn()
+    if not args.dest:
+        print("Usage: dtn send <IPN|all> <message>")
+        sys.exit(1)
+
+    message = " ".join(args.message) if args.message else f"Hello from ipn:{MY_IPN}"
+
+    if args.dest == "all":
+        # Send to all neighbors
+        out, _, _ = run("echo 'l plan' | ipnadmin 2>/dev/null")
+        targets = []
+        for line in out.splitlines():
+            line = line.strip().lstrip(":").strip()
+            m = re.match(r"(\d+)\s+xmit", line)
+            if m and m.group(1) != MY_IPN:
+                targets.append(m.group(1))
+        for ipn in targets:
+            dest = f"ipn:{ipn}.1"
+            print(f"Sending to {dest}...", end=" ")
+            _, _, rc = run(f'bpsource "{dest}" "{message}" 2>&1')
+            print("OK" if rc == 0 else "FAILED")
+    else:
+        dest_ipn = args.dest.replace("ipn:", "")
+        dest = f"ipn:{dest_ipn}.1"
+        print(f"Sending to {dest}: {message}")
+        out, err, rc = run(f'bpsource "{dest}" "{message}" 2>&1')
+        if rc == 0:
+            print("Sent.")
+        else:
+            print(f"Failed: {err}")
+
+
+def cmd_contacts(_args):
+    """List ION contacts."""
+    out, _, _ = run("echo 'l contact' | ionadmin 2>/dev/null")
+    if not out:
+        print("No contacts (is ION running?)")
+        return
+    count = 0
+    for line in out.splitlines():
+        line = line.strip()
+        if "xmit rate" in line and "Stopping" not in line:
+            # Simplify output
+            m = re.search(r"node\s+(\d+)\s+to\s+node\s+(\d+)\s+is\s+(\d+)", line)
+            if m:
+                print(f"  ipn:{m.group(1)} -> ipn:{m.group(2)}  rate={m.group(3)}")
+                count += 1
+            else:
+                print(f"  {line[:100]}")
+                count += 1
+    print(f"\n{count} contacts total")
+
+
+def cmd_plans(_args):
+    """List ION plans."""
+    list_neighbors()
+
+
+def cmd_restart(_args):
+    """Restart ION and all DTN services."""
+    detect_ipn()
+    print("Stopping services...")
+    for svc in ["dtn-discovery", "dtn-chat", "dtnex", "dtn-metadata-updater"]:
+        run(f"sudo systemctl stop {svc}.service 2>/dev/null")
+
+    print("Stopping ION...")
+    run("ionstop 2>/dev/null")
+    import time
+    time.sleep(2)
+    run("killm 2>/dev/null")
+    time.sleep(1)
+
+    print(f"Starting ION from {HOST_RC}...")
+    out, err, rc = run(f"ionstart -I {HOST_RC} 2>&1")
+    if rc != 0:
+        print(f"ION start failed: {err}")
+        return
+
+    print("Starting services...")
+    for svc in ["dtnex", "dtn-chat", "dtn-discovery", "dtn-metadata-updater"]:
+        run(f"sudo systemctl start {svc}.service 2>/dev/null")
+
+    print("DTN node restarted.")
+
+
+def cmd_logs(args):
+    """Tail service logs."""
+    svc = args.service or "dtnex"
+    svc_map = {
+        "dtnex": "dtnex",
+        "discovery": "dtn-discovery",
+        "chat": "dtn-chat",
+        "ionwd": "ionwd",
+        "metadata": "dtn-metadata-updater",
+        "ion": None,
+    }
+    if svc == "ion":
+        os.execvp("tail", ["tail", "-f", os.path.join(DTN_DIR, "ion.log")])
+    elif svc in svc_map:
+        os.execvp("journalctl", ["journalctl", "-u", f"{svc_map[svc]}.service", "-f"])
+    else:
+        print(f"Unknown service: {svc}")
+        print(f"Available: {', '.join(svc_map.keys())}")
+
+
+def cmd_config(_args):
+    """Show current node configuration."""
+    detect_ipn()
+    print(f"Node:       ipn:{MY_IPN}")
+    print(f"DTN Dir:    {DTN_DIR}")
+    print(f"Host RC:    {HOST_RC}")
+    print(f"dtnex.conf: {os.path.join(DTN_DIR, 'dtnex.conf')}")
+    print()
+
+    if os.path.exists(os.path.join(DTN_DIR, "dtnex.conf")):
+        print("--- dtnex.conf ---")
+        with open(os.path.join(DTN_DIR, "dtnex.conf")) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    print(f"  {line}")
+
+
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="dtn",
+        description="Unified CLI for managing a DTN node on ION-DTN",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # status
+    sub.add_parser("status", help="Show node and service status")
+
+    # neighbors
+    nb = sub.add_parser("neighbors", aliases=["nb", "neighbour", "neighbours"],
+                        help="Manage neighbors")
+    nb.add_argument("action", nargs="?", default="list",
+                    choices=["list", "add", "remove", "ping"],
+                    help="Action to perform")
+    nb.add_argument("ipn", nargs="?", help="IPN number")
+    nb.add_argument("ip", nargs="?", help="IP address (for add)")
+
+    # init
+    init_p = sub.add_parser("init", help="Setup a new DTN node (interactive wizard)")
+    init_p.add_argument("--ipn", help="IPN node number")
+    init_p.add_argument("--name", help="Node name")
+    init_p.add_argument("--email", help="Contact email")
+
+    # discover
+    disc = sub.add_parser("discover", aliases=["disc"],
+                          help="Query discovered nodes")
+    disc.add_argument("subaction", nargs="?", default="list",
+                      choices=["list", "summary", "search"])
+    disc.add_argument("query", nargs="?", help="Search query")
+
+    # send
+    sd = sub.add_parser("send", help="Send a DTN bundle message")
+    sd.add_argument("dest", help="Destination IPN or 'all'")
+    sd.add_argument("message", nargs="*", help="Message text")
+
+    # contacts
+    sub.add_parser("contacts", help="List ION contacts")
+
+    # plans
+    sub.add_parser("plans", help="List ION plans")
+
+    # restart
+    sub.add_parser("restart", help="Restart ION and DTN services")
+
+    # logs
+    lg = sub.add_parser("logs", help="Tail service logs")
+    lg.add_argument("service", nargs="?",
+                    help="Service name (dtnex, discovery, chat, ionwd, metadata, ion)")
+
+    # config
+    sub.add_parser("config", help="Show node configuration")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    commands = {
+        "init": cmd_init,
+        "status": cmd_status,
+        "neighbors": cmd_neighbors,
+        "nb": cmd_neighbors,
+        "neighbour": cmd_neighbors,
+        "neighbours": cmd_neighbors,
+        "discover": cmd_discover,
+        "disc": cmd_discover,
+        "send": cmd_send,
+        "contacts": cmd_contacts,
+        "plans": cmd_plans,
+        "restart": cmd_restart,
+        "logs": cmd_logs,
+        "config": cmd_config,
+    }
+
+    func = commands.get(args.command)
+    if func:
+        func(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

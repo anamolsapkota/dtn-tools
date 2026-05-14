@@ -1,0 +1,16 @@
+[Unit]
+Description=DTN Neighbor Discovery Daemon
+After=network.target ionwd.service dtnex.service
+Wants=dtnex.service
+
+[Service]
+Type=simple
+User=pi05
+WorkingDirectory=/home/pi05/dtn/dtn-discovery
+ExecStart=/usr/bin/python3 /home/pi05/dtn/dtn-discovery/discovery.py
+Restart=on-failure
+RestartSec=30
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/pi05/dtn/ione-code
+
+[Install]
+WantedBy=multi-user.target
