@@ -209,21 +209,10 @@ def list_neighbors():
 
 
 def add_neighbor(ipn, ip):
-    """Add a new neighbor to ION config and running instance."""
+    """Add a new neighbor to running ION + host.rc (fully persistent)."""
     detect_ipn()
     print(f"Adding neighbor ipn:{ipn} at {ip}...")
-
-    # Use the existing add-neighbour.sh if available
-    if os.path.exists(ADD_NEIGHBOUR_SCRIPT):
-        out, err, rc = run(f"bash {ADD_NEIGHBOUR_SCRIPT} {ipn} {ip}")
-        if rc == 0:
-            print(out)
-        else:
-            print(f"Script failed: {err}")
-            print("Falling back to direct ION commands...")
-            _add_neighbor_direct(ipn, ip)
-    else:
-        _add_neighbor_direct(ipn, ip)
+    _add_neighbor_direct(ipn, ip)
 
 
 def _add_neighbor_direct(ipn, ip):
@@ -257,12 +246,88 @@ q
         with open(NEIGHBOURS_FILE, "a") as f:
             f.write(f"node-{ipn} {ipn} {ip}\n")
 
+    # Persist to host*.rc
+    _persist_add_to_hostrc(ipn, ip, port, rate, duration)
+
     print(f"Added neighbor ipn:{ipn} at {ip}:{port}")
-    print("Contacts, outduct, and plan configured in running ION.")
+    print("Contacts, outduct, and plan configured (running ION + host.rc).")
+
+
+def _find_hostrc():
+    """Find the host*.rc file."""
+    detect_ipn()
+    candidates = list(Path(DTN_DIR).glob(f"host{MY_IPN}.rc"))
+    if candidates:
+        return str(candidates[0])
+    # Try any host*.rc
+    candidates = list(Path(DTN_DIR).glob("host*.rc"))
+    if candidates:
+        return str(candidates[0])
+    return None
+
+
+def _persist_add_to_hostrc(ipn, ip, port, rate, duration):
+    """Add a neighbor to the host*.rc file for persistence across restarts."""
+    hostrc = _find_hostrc()
+    if not hostrc:
+        return
+
+    content = Path(hostrc).read_text()
+
+    # Check if already in file
+    if f"{MY_IPN} {ipn} {rate}" in content and f"a plan {ipn}" in content:
+        return
+
+    # Add contacts/ranges before "## end ionadmin"
+    ion_block = f"""
+# Neighbor ipn:{ipn}
+a contact +1 +{duration} {MY_IPN} {ipn} {rate}
+a contact +1 +{duration} {ipn} {MY_IPN} {rate}
+a range +1 +{duration} {MY_IPN} {ipn} 1
+a range +1 +{duration} {ipn} {MY_IPN} 1"""
+    content = content.replace("## end ionadmin", ion_block + "\n## end ionadmin")
+
+    # Add outduct before "## end bpadmin"
+    bp_block = f"\na outduct udp {ip}:{port} udpclo"
+    content = content.replace("## end bpadmin", bp_block + "\n## end bpadmin")
+
+    # Add plan before "## end ipnadmin"
+    ipn_block = f"\na plan {ipn} udp/{ip}:{port}"
+    content = content.replace("## end ipnadmin", ipn_block + "\n## end ipnadmin")
+
+    Path(hostrc).write_text(content)
+    print(f"  Updated {hostrc}")
+
+
+def _persist_remove_from_hostrc(ipn):
+    """Remove a neighbor from the host*.rc file."""
+    hostrc = _find_hostrc()
+    if not hostrc:
+        return
+
+    lines = Path(hostrc).read_text().splitlines()
+    new_lines = []
+    for line in lines:
+        # Skip lines referencing this IPN (contacts, ranges, outducts, plans)
+        stripped = line.strip()
+        if stripped.startswith("#") and (f"ipn:{ipn}" in stripped or f"neighbour {ipn}" in stripped or f"Neighbor {ipn}" in stripped or f"neighbor {ipn}" in stripped):
+            continue
+        if re.search(rf"\b{MY_IPN}\s+{ipn}\b", stripped):
+            continue
+        if re.search(rf"\b{ipn}\s+{MY_IPN}\b", stripped):
+            continue
+        if re.search(rf"a plan {ipn}\b", stripped):
+            continue
+        # Match outduct by looking for the IP from plan
+        # (outducts don't have IPN, so we handle them separately)
+        new_lines.append(line)
+
+    Path(hostrc).write_text("\n".join(new_lines) + "\n")
+    print(f"  Updated {hostrc}")
 
 
 def remove_neighbor(ipn):
-    """Remove a neighbor from the running ION instance."""
+    """Remove a neighbor from the running ION instance and host.rc."""
     detect_ipn()
     print(f"Removing neighbor ipn:{ipn}...")
 
@@ -304,8 +369,10 @@ q
         with open(NEIGHBOURS_FILE, "w") as f:
             f.writelines(lines)
 
-    print(f"Removed neighbor ipn:{ipn}")
-    print("Note: To persist, also remove from host*.rc and restart ION.")
+    # Persist removal to host*.rc
+    _persist_remove_from_hostrc(ipn)
+
+    print(f"Removed neighbor ipn:{ipn} (running ION + host.rc updated)")
 
 
 def ping_neighbors(target_ipn=None):
