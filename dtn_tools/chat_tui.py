@@ -255,8 +255,11 @@ class ChatTUI:
         """Start the urwid main loop with receiver thread."""
         self.running = True
 
-        # Register the bprecvfile endpoint
+        # Kill any existing bprecvfile on our endpoint to avoid
+        # "Endpoint is already open" errors
         if not self.dry_run:
+            _run(f"pkill -f 'bprecvfile {self.recv_eid}' 2>/dev/null")
+            time.sleep(0.5)
             _run_admin("bpadmin", f"a endpoint {self.recv_eid} q\nq\n")
 
         # Create temp directory for received bundles
