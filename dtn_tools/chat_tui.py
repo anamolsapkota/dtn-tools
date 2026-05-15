@@ -365,10 +365,12 @@ class ChatTUI:
                 self.columns.set_focus(0)
             else:
                 self.columns.set_focus(1)
+                self.right_pane.set_focus("footer")
             self._update_status_bar()
         elif key == "esc" and self.sidebar_focused:
             self.sidebar_focused = False
             self.columns.set_focus(1)
+            self.right_pane.set_focus("footer")
         elif key == "enter" and self.sidebar_focused:
             # Find the focused sidebar entry
             widget = None
@@ -390,6 +392,7 @@ class ChatTUI:
                 self._switch_to(widget.ipn)
                 self.sidebar_focused = False
                 self.columns.set_focus(1)
+                self.right_pane.set_focus("footer")
         elif key == "enter" and not self.sidebar_focused:
             text = self.input_edit.get_edit_text()
             if text:
@@ -561,9 +564,10 @@ class ChatTUI:
         plan_out, _, plan_rc = _run_admin("ipnadmin", "l plan\nq\n")
         self.plans = {}
         if plan_rc == 0 and plan_out:
-            # Format: ": 268485000 xmit 100.96.108.37:4556 xmit rate: 0"
+            # Format: "268485000 xmit 100.96.108.37:4556 xmit rate: 0"
+            # Some lines may start with ": " prefix
             for line in plan_out.splitlines():
-                m = re.search(r":\s*(\d+)\s+xmit\s+(\S+)", line)
+                m = re.match(r"\s*:?\s*(\d{5,})\s+xmit\s+(\S+)", line)
                 if m:
                     ipn = m.group(1)
                     outduct = m.group(2)
