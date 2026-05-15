@@ -567,16 +567,32 @@ def cmd_chat(args):
     """Interactive terminal chat over DTN bundles."""
     detect_ipn()
 
-    mod = _import_module("chat", "chat.py")
-    session = mod.ChatSession(MY_IPN, DTN_DIR, DISCOVERY_DB)
-
     dest = None
     if hasattr(args, "dest") and args.dest:
         dest = args.dest.replace("ipn:", "")
 
+    # One-shot message: use lightweight ChatSession
     if dest and hasattr(args, "message") and args.message:
+        mod = _import_module("chat", "chat.py")
+        session = mod.ChatSession(MY_IPN, DTN_DIR, DISCOVERY_DB)
         session.send_oneshot(dest, " ".join(args.message))
+        return
+
+    # Interactive: use TUI if TTY, else fallback
+    if os.isatty(sys.stdout.fileno()):
+        try:
+            tui_mod = _import_module("chat_tui", "chat_tui.py")
+            tui = tui_mod.ChatTUI(MY_IPN, DTN_DIR, DISCOVERY_DB)
+            tui.run()
+        except ImportError:
+            print("urwid not installed. Install with: pip install urwid")
+            print("Falling back to basic chat...")
+            mod = _import_module("chat", "chat.py")
+            session = mod.ChatSession(MY_IPN, DTN_DIR, DISCOVERY_DB)
+            session.run_interactive(initial_dest=dest)
     else:
+        mod = _import_module("chat", "chat.py")
+        session = mod.ChatSession(MY_IPN, DTN_DIR, DISCOVERY_DB)
         session.run_interactive(initial_dest=dest)
 
 
