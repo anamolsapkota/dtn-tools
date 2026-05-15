@@ -40,7 +40,7 @@ Detailed architecture documentation for dtn-tools — how the system works, how 
 
 ### 1. dtn CLI (`dtn`)
 
-The main user interface. A single Python script (~800 lines) that provides all node management commands. Communicates with ION via `ionadmin`, `bpadmin`, `ipnadmin` admin programs and uses `bpsource`/`bprecvfile` for data transfer.
+The main user interface. A single Python script (~1,166 lines) that provides all node management commands. Communicates with ION via `ionadmin`, `bpadmin`, `ipnadmin` admin programs and uses `bpsource`/`bprecvfile` for data transfer.
 
 **Key design decisions:**
 - Single-file CLI for easy distribution (`install.sh` symlinks it to `/usr/local/bin/dtn`)
@@ -167,10 +167,18 @@ Terminal chat uses **service number 5** (`ipn:<node>.5`). This is separate from:
 
 ### Architecture
 
-Chat is implemented in `dtn_tools/chat.py` with two main classes:
+Chat is implemented in two modules:
 
-- **ChatHistory** — Persistent JSON storage (`~/dtn/chat-history.json`) with per-sender conversations, unread tracking, and atomic writes. Thread-safe with locking.
-- **ChatSession** — Interactive UI with receiver thread, notification system, and slash commands.
+- **`dtn_tools/chat.py`** (~575 lines) — `ChatHistory` class for persistent JSON storage (`~/dtn/chat-history.json`) with per-sender conversations, unread tracking, and atomic writes. Thread-safe with locking. Also provides `ChatSession` as a basic fallback when urwid is unavailable.
+- **`dtn_tools/chat_tui.py`** (~790 lines) — `ChatTUI` class built with **urwid** (pure Python TUI framework). Provides a full-screen interface with:
+  - **Split-screen layout**: Left sidebar (~30%) with scrollable Neighbors and Known Nodes sections, right pane (~70%) with message display and input bar
+  - **Color-coded output**: Blue for your messages, red for received, green for neighbor headers, magenta for known nodes, dim gray for timestamps
+  - **Three conversation-switching mechanisms**: Tab focus (browse sidebar with arrow keys), Alt+Up/Down (quick cycle), and /to command (SSH-safe fallback)
+  - **Pipe-based receiver**: Background thread runs `bprecvfile`, pushes messages to urwid via `os.pipe()` + `loop.watch_pipe()` for thread-safe UI updates
+  - **Dynamic title bar**: Shows node name, IPN, function key hints
+  - **Network status**: ION running state, neighbor/node/contact counts
+
+When `dtn chat` is launched on a TTY, the CLI auto-detects and uses ChatTUI. Falls back to ChatSession if urwid is not installed or stdout is not a TTY.
 
 ### Message Format
 
