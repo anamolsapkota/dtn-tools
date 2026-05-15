@@ -66,7 +66,12 @@ PALETTE = [
     ("input_prompt",    "yellow,bold",    "black"),
     ("net_ok",          "light green",    "black"),
     ("net_down",        "light red",      "black"),
+    ("online",          "light green",    "black"),
+    ("offline",         "dark gray",      "black"),
 ]
+
+# Online status check interval (seconds)
+STATUS_CHECK_INTERVAL = 60
 
 
 # ---------------------------------------------------------------------------
@@ -77,12 +82,13 @@ class SidebarEntry(urwid.WidgetWrap):
     """A selectable sidebar entry showing node name, unread count, and extra info."""
 
     def __init__(self, ipn: str, name: str, unread: int = 0, extra: str = "",
-                 is_active: bool = False):
+                 is_active: bool = False, online: str = "unknown"):
         self.ipn = ipn
         self.node_name = name
         self.unread = unread
         self.extra = extra
         self.is_active = is_active
+        self.online = online  # "online", "offline", or "unknown"
 
         # Build the text markup
         markup = self._build_markup()
@@ -96,15 +102,21 @@ class SidebarEntry(urwid.WidgetWrap):
         super().__init__(widget)
 
     def _build_markup(self):
-        """Build urwid text markup with name, unread count, and extra info."""
-        parts = [f" {self.node_name}"]
+        """Build urwid text markup with status dot, name, unread count, and extra info."""
+        # Online status dot
+        if self.online == "online":
+            dot = ("online", "\u25cf ")  # filled circle
+        elif self.online == "offline":
+            dot = ("offline", "\u25cb ")  # hollow circle
+        else:
+            dot = ("offline", "\u25cb ")  # hollow circle for unknown
+
+        parts = [dot, self.node_name]
         if self.unread > 0:
-            parts = [f" {self.node_name} ", ("unread_count", f"({self.unread})")]
+            parts.append(" ")
+            parts.append(("unread_count", f"({self.unread})"))
         if self.extra:
-            if isinstance(parts, list) and len(parts) > 1:
-                parts.append(("msg_ts", f" {self.extra}"))
-            else:
-                parts = [f" {self.node_name} ", ("msg_ts", f"{self.extra}")]
+            parts.append(("msg_ts", f" {self.extra}"))
         return parts
 
     def selectable(self):
@@ -153,6 +165,10 @@ class ChatTUI:
         self._pipe_w = None  # set by watch_pipe() in run()
         self._pending_messages = []
         self._pending_lock = threading.Lock()
+
+        # Online status tracking: {ipn: "online"|"offline"|"unknown"}
+        self._node_status = {}
+        self._status_lock = threading.Lock()
 
         # Build the UI widget tree
         self._build_ui()
@@ -277,7 +293,10 @@ class ChatTUI:
 
         # Start the receiver thread
         recv_thread = threading.Thread(target=self._receiver_loop, daemon=True)
+        # Start the online status checker thread
+        status_thread = threading.Thread(target=self._status_checker_loop, daemon=True)
         recv_thread.start()
+        status_thread.start()
 
         # Populate sidebar
         self._refresh_nodes()
@@ -485,9 +504,12 @@ class ChatTUI:
                             sender_name = ""
                             msg = content
 
-                        # Update node name cache
+                        # Update node name cache and online status
                         if sender_name and sender_ipn != "unknown":
                             self.node_names[sender_ipn] = sender_name
+                        if sender_ipn != "unknown":
+                            with self._status_lock:
+                                self._node_status[sender_ipn] = "online"
 
                         # Build message data
                         msg_data = {
@@ -512,6 +534,36 @@ class ChatTUI:
         finally:
             proc.terminate()
 
+    def _status_checker_loop(self):
+        """Background thread: periodically bping neighbors to check online status."""
+        # Wait a few seconds for ION to be ready
+        time.sleep(5)
+        while self.running:
+            plans = dict(self.plans)  # snapshot
+            for ipn, outduct in plans.items():
+                if not self.running:
+                    break
+                # Use bping with short timeout (3s) to check if node is reachable
+                src_eid = f"ipn:{self.my_ipn}.3"
+                dst_eid = f"ipn:{ipn}.2"
+                _, _, rc = _run(
+                    f"timeout 4 bping {src_eid} {dst_eid} -c 1 -q 2>/dev/null",
+                    timeout=6,
+                )
+                with self._status_lock:
+                    self._node_status[ipn] = "online" if rc == 0 else "offline"
+                # Wake urwid to refresh sidebar
+                if self._pipe_w:
+                    try:
+                        os.write(self._pipe_w, b"s")
+                    except OSError:
+                        pass
+            # Sleep until next check cycle
+            for _ in range(STATUS_CHECK_INTERVAL):
+                if not self.running:
+                    break
+                time.sleep(1)
+
     def _populate_sidebar(self, neighbors, known):
         """Populate the neighbor and known node sidebar lists.
 
@@ -523,6 +575,10 @@ class ChatTUI:
         self.neighbor_walker[:] = []
         self.known_walker[:] = []
 
+        # Snapshot online status
+        with self._status_lock:
+            status_snap = dict(self._node_status)
+
         # Populate neighbors sorted by name
         for ipn in sorted(neighbors, key=lambda i: neighbors[i].get("name", i).lower()):
             info = neighbors[ipn]
@@ -531,8 +587,9 @@ class ChatTUI:
             is_active = (ipn == self.active_ipn)
             # Count unread messages for this node
             unread = self.history.unread_count(ipn) if hasattr(self.history, "unread_count") else 0
+            online = status_snap.get(ipn, "unknown")
             entry = SidebarEntry(ipn, name, unread=unread, extra=extra,
-                                 is_active=is_active)
+                                 is_active=is_active, online=online)
             self.neighbor_walker.append(entry)
 
         # Populate known nodes sorted by name
@@ -543,8 +600,9 @@ class ChatTUI:
             extra = f"{hops}h" if hops != "" else ""
             is_active = (ipn == self.active_ipn)
             unread = self.history.unread_count(ipn) if hasattr(self.history, "unread_count") else 0
+            online = status_snap.get(ipn, "unknown")
             entry = SidebarEntry(ipn, name, unread=unread, extra=extra,
-                                 is_active=is_active)
+                                 is_active=is_active, online=online)
             self.known_walker.append(entry)
 
         # Update header text with counts
