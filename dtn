@@ -342,32 +342,74 @@ def _persist_add_to_hostrc(ipn, ip, port, rate, duration):
 
     updated = False
 
-    # Add contacts/ranges before "## end ionadmin"
+    # Add contacts/ranges before "e 1" in ionadmin section (must be before execute)
     ion_block = f"""
 # Neighbor ipn:{ipn}
 a contact +1 +{duration} {MY_IPN} {ipn} {rate}
 a contact +1 +{duration} {ipn} {MY_IPN} {rate}
 a range +1 +{duration} {MY_IPN} {ipn} 1
 a range +1 +{duration} {ipn} {MY_IPN} 1"""
-    if "## end ionadmin" in content:
-        content = content.replace("## end ionadmin", ion_block + "\n## end ionadmin")
-        updated = True
+    # Find the 'e 1' line within the ionadmin section and insert before it
+    ion_end = "## end ionadmin"
+    if ion_end in content:
+        # Extract ionadmin section to find its 'e 1'
+        ion_start_idx = content.find("## begin ionadmin")
+        ion_end_idx = content.find(ion_end)
+        if ion_start_idx >= 0 and ion_end_idx >= 0:
+            ion_section = content[ion_start_idx:ion_end_idx]
+            # Find last 'e 1' in ionadmin section
+            e1_pos = ion_section.rfind("\ne 1")
+            if e1_pos >= 0:
+                insert_at = ion_start_idx + e1_pos
+                content = content[:insert_at] + ion_block + content[insert_at:]
+                updated = True
+            else:
+                # No 'e 1' found, insert before end marker
+                content = content.replace(ion_end, ion_block + "\n" + ion_end)
+                updated = True
     else:
         print("  WARNING: Missing '## end ionadmin' marker in host.rc — contacts not persisted")
 
-    # Add outduct before "## end bpadmin"
+    # Add outduct before "e 1" in bpadmin section (must be before execute)
     bp_block = f"\na outduct udp {ip}:{port} udpclo"
-    if "## end bpadmin" in content:
-        content = content.replace("## end bpadmin", bp_block + "\n## end bpadmin")
-        updated = True
+    bp_end = "## end bpadmin"
+    if bp_end in content:
+        bp_start_idx = content.find("## begin bpadmin")
+        bp_end_idx = content.find(bp_end)
+        if bp_start_idx >= 0 and bp_end_idx >= 0:
+            bp_section = content[bp_start_idx:bp_end_idx]
+            e1_pos = bp_section.rfind("\ne 1")
+            if e1_pos >= 0:
+                # Insert before 's\n' if present (before start command), else before 'e 1'
+                s_pos = bp_section.rfind("\ns\n")
+                if s_pos >= 0 and s_pos < e1_pos:
+                    insert_at = bp_start_idx + s_pos
+                else:
+                    insert_at = bp_start_idx + e1_pos
+                content = content[:insert_at] + bp_block + content[insert_at:]
+                updated = True
+            else:
+                content = content.replace(bp_end, bp_block + "\n" + bp_end)
+                updated = True
     else:
         print("  WARNING: Missing '## end bpadmin' marker in host.rc — outduct not persisted")
 
-    # Add plan before "## end ipnadmin"
+    # Add plan before "e 1" in ipnadmin section (must be before execute)
     ipn_block = f"\na plan {ipn} udp/{ip}:{port}"
-    if "## end ipnadmin" in content:
-        content = content.replace("## end ipnadmin", ipn_block + "\n## end ipnadmin")
-        updated = True
+    ipn_end = "## end ipnadmin"
+    if ipn_end in content:
+        ipn_start_idx = content.find("## begin ipnadmin")
+        ipn_end_idx = content.find(ipn_end)
+        if ipn_start_idx >= 0 and ipn_end_idx >= 0:
+            ipn_section = content[ipn_start_idx:ipn_end_idx]
+            e1_pos = ipn_section.rfind("\ne 1")
+            if e1_pos >= 0:
+                insert_at = ipn_start_idx + e1_pos
+                content = content[:insert_at] + ipn_block + content[insert_at:]
+                updated = True
+            else:
+                content = content.replace(ipn_end, ipn_block + "\n" + ipn_end)
+                updated = True
     else:
         print("  WARNING: Missing '## end ipnadmin' marker in host.rc — plan not persisted")
 

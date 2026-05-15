@@ -527,9 +527,11 @@ a endpoint ipn:{ipn}.2 q
 a endpoint ipn:{ipn}.3 q
 a endpoint ipn:{ipn}.4 q
 a endpoint ipn:{ipn}.5 q
+a endpoint ipn:{ipn}.7 q
 a endpoint ipn:{ipn}.8 q
 a endpoint ipn:{ipn}.64 q
 a endpoint ipn:{ipn}.65 q
+a endpoint ipn:{ipn}.12161 q
 
 # UDP protocol
 a protocol udp 1400 100
