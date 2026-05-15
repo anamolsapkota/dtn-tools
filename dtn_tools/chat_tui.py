@@ -150,7 +150,7 @@ class ChatTUI:
         self.node_list = []
 
         # Receiver thread wakeup pipe
-        self._pipe_r, self._pipe_w = os.pipe()
+        self._pipe_w = None  # set by watch_pipe() in run()
         self._pending_messages = []
         self._pending_lock = threading.Lock()
 
@@ -272,7 +272,8 @@ class ChatTUI:
             handle_mouse=False,
         )
         # Register the pipe fd so the receiver thread can wake the loop
-        self.loop.watch_pipe(self._on_pipe_data)
+        # watch_pipe() creates its own pipe and returns the write fd
+        self._pipe_w = self.loop.watch_pipe(self._on_pipe_data)
 
         # Start the receiver thread
         recv_thread = threading.Thread(target=self._receiver_loop, daemon=True)
