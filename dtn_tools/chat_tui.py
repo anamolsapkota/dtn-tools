@@ -343,16 +343,23 @@ class ChatTUI:
         if direction == "out":
             name_attr = "msg_you"
             name_text = "you"
+            # Right-aligned messenger style for sent messages
+            text_widget = urwid.Text([
+                ("msg_ts", f"{time_text} "),
+                (name_attr, name_text),
+                ("default", f": {msg_text}  "),
+            ], align="right")
         else:
             name_attr = "msg_them"
             name_text = msg.get("name") or msg.get("from", "?")
+            # Left-aligned for received messages
+            text_widget = urwid.Text([
+                ("msg_ts", f"  {time_text} "),
+                (name_attr, name_text),
+                ("default", f": {msg_text}"),
+            ], align="left")
 
-        widget = urwid.Text([
-            ("msg_ts", f"  {time_text} "),
-            (name_attr, name_text),
-            ("default", f": {msg_text}"),
-        ])
-        self.msg_walker.append(widget)
+        self.msg_walker.append(text_widget)
 
     def _load_conversation(self, ipn):
         """Clear the message pane and load the last 50 messages for the given IPN."""
