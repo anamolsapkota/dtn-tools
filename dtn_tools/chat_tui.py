@@ -175,10 +175,12 @@ class ChatTUI:
         """Construct the full urwid widget tree."""
 
         # --- Title bar ---
-        self.title_text = urwid.Text(
-            f" DTN Chat  |  ipn:{self.my_ipn}", align="left"
+        title_left = urwid.Text(f" DTN Chat — {self.my_name} (ipn:{self.my_ipn})", align="left")
+        title_right = urwid.Text("F1:Help  F2:Nodes  F10:Quit ", align="right")
+        self.title_bar = urwid.AttrMap(
+            urwid.Columns([title_left, title_right]),
+            "title_bar",
         )
-        self.title_bar = urwid.AttrMap(self.title_text, "title_bar")
 
         # --- Status bar ---
         self.status_text = urwid.Text(" Ready", align="left")
