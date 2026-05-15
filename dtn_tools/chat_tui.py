@@ -142,6 +142,11 @@ class ChatTUI:
         self.active_ipn = None
         self._last_date = None
 
+        # UI state
+        self.sidebar_focused = False
+        self.plans = {}
+        self.node_list = []
+
         # Receiver thread wakeup pipe
         self._pipe_r, self._pipe_w = os.pipe()
         self._pending_messages = []
@@ -316,7 +321,59 @@ class ChatTUI:
 
     def _handle_input(self, key):
         """Handle unhandled keystrokes (keybindings, focus switching, etc.)."""
-        pass
+        if key in ("f10", "ctrl c"):
+            raise urwid.ExitMainLoop()
+        elif key == "f1":
+            self._show_help()
+        elif key == "f2":
+            self._refresh_nodes()
+        elif key == "tab":
+            self.sidebar_focused = not self.sidebar_focused
+            if self.sidebar_focused:
+                self.columns.set_focus(0)
+            else:
+                self.columns.set_focus(1)
+            self._update_status_bar()
+        elif key == "esc" and self.sidebar_focused:
+            self.sidebar_focused = False
+            self.columns.set_focus(1)
+        elif key == "enter" and self.sidebar_focused:
+            # Find the focused sidebar entry
+            widget = None
+            try:
+                # Try neighbor listbox first
+                w = self.neighbor_listbox.get_focus()[0]
+                if isinstance(w, SidebarEntry):
+                    widget = w
+            except (IndexError, TypeError):
+                pass
+            if widget is None:
+                try:
+                    w = self.known_listbox.get_focus()[0]
+                    if isinstance(w, SidebarEntry):
+                        widget = w
+                except (IndexError, TypeError):
+                    pass
+            if widget is not None:
+                self._switch_to(widget.ipn)
+                self.sidebar_focused = False
+                self.columns.set_focus(1)
+        elif key == "enter" and not self.sidebar_focused:
+            text = self.input_edit.get_edit_text()
+            if text:
+                if text.startswith("/"):
+                    self._process_command(text)
+                else:
+                    self._send_message(text)
+                self.input_edit.set_edit_text("")
+        elif key == "meta up":
+            self._cycle_conversation(-1)
+        elif key == "meta down":
+            self._cycle_conversation(1)
+        elif key == "meta n":
+            self._jump_to_unread()
+        elif key in ("page up", "page down"):
+            self.msg_listbox.keypress((20,), key)
 
     def _on_pipe_data(self, data):
         """Called by urwid main loop when the receiver thread writes to the pipe."""
@@ -431,4 +488,177 @@ class ChatTUI:
 
     def _switch_to(self, ipn: str):
         """Switch the active conversation to the given IPN."""
-        pass
+        ipn = ipn.replace("ipn:", "")
+        self.active_ipn = ipn
+        self.history.mark_read(ipn)
+        self.history.set_last_active(ipn)
+
+        # Build chat header with node name, IPN, and connection info
+        name = self.node_names.get(ipn, "") or self.history.conversation_name(ipn) or f"node-{ipn}"
+        if ipn in self.plans:
+            conn_info = f"direct via {self.plans[ipn]}"
+        else:
+            conn_info = "routed"
+        self.chat_header_text.set_text(f" {name} (ipn:{ipn}) — {conn_info}")
+
+        self._load_conversation(ipn)
+
+        if not self.dry_run:
+            self._refresh_nodes()
+
+        self._update_status_bar()
+
+    # ------------------------------------------------------------------
+    # Send and command processing
+    # ------------------------------------------------------------------
+
+    def _send_message(self, text):
+        """Send a chat message to the active conversation."""
+        if not self.active_ipn:
+            self._set_status("No active conversation")
+            return
+
+        payload = json.dumps({
+            "from": self.my_ipn,
+            "name": self.my_name,
+            "msg": text,
+            "ts": time.strftime("%H:%M:%S"),
+        })
+        escaped = payload.replace("'", "'\\''")
+        dest = f"ipn:{self.active_ipn}.{self.CHAT_SVC}"
+        _, _, rc = _run(f"bpsource {dest} '{escaped}' 2>/dev/null")
+
+        if rc == 0:
+            self.history.add_outgoing(self.active_ipn, self.my_ipn, self.my_name, text)
+            self._append_message({
+                "dir": "out",
+                "from": self.my_ipn,
+                "name": self.my_name,
+                "msg": text,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+            self._scroll_to_bottom()
+        else:
+            self._set_status("Send failed!")
+
+    def _process_command(self, text):
+        """Process a slash command."""
+        parts = text.lstrip("/").split(None, 1)
+        cmd = parts[0].lower() if parts else ""
+        args = parts[1] if len(parts) > 1 else ""
+
+        if cmd in ("quit", "exit", "q"):
+            raise urwid.ExitMainLoop()
+        elif cmd == "to" and args:
+            target = args.strip().replace("ipn:", "")
+            # Try exact name match
+            for ipn, name in self.node_names.items():
+                if name.lower() == target.lower():
+                    self._switch_to(ipn)
+                    return
+            # Try partial name match
+            for ipn, name in self.node_names.items():
+                if target.lower() in name.lower():
+                    self._switch_to(ipn)
+                    return
+            # Try as raw IPN number
+            if target.isdigit():
+                self._switch_to(target)
+                return
+            self._set_status(f"Unknown node: {target}")
+        elif cmd == "nodes":
+            self._refresh_nodes()
+            self._set_status("Node list refreshed")
+        elif cmd == "help":
+            self._show_help()
+        else:
+            self._set_status("Unknown command")
+
+    # ------------------------------------------------------------------
+    # Conversation navigation
+    # ------------------------------------------------------------------
+
+    def _cycle_conversation(self, direction):
+        """Cycle through conversations by direction (-1 = prev, 1 = next)."""
+        convos = self.history.list_conversations()
+        if not convos:
+            return
+        ipn_list = [c[0] for c in convos]
+        if not ipn_list:
+            return
+        if self.active_ipn in ipn_list:
+            idx = ipn_list.index(self.active_ipn)
+            idx = (idx + direction) % len(ipn_list)
+        else:
+            idx = 0
+        self._switch_to(ipn_list[idx])
+
+    def _jump_to_unread(self):
+        """Jump to the first conversation with unread messages."""
+        unread = self.history.all_unread()
+        for ipn in unread:
+            if ipn != self.active_ipn:
+                self._switch_to(ipn)
+                return
+
+    # ------------------------------------------------------------------
+    # Status bar helpers
+    # ------------------------------------------------------------------
+
+    def _update_status_bar(self):
+        """Update the status bar with active conversation and keybinding hints."""
+        if self.active_ipn:
+            name = self.node_names.get(self.active_ipn, "") or self.history.conversation_name(self.active_ipn) or f"ipn:{self.active_ipn}"
+            status = f" {name} | Tab:sidebar  Alt+↑↓:switch  Alt+N:unread  F1:help  F10:quit"
+        else:
+            status = " No conversation | Tab:sidebar  F1:help  F2:refresh  F10:quit"
+        self.status_text.set_text(status)
+
+    def _set_status(self, text):
+        """Set status bar to a simple message."""
+        self.status_text.set_text(f" {text}")
+
+    def _show_help(self):
+        """Show a help overlay with keybindings and commands."""
+        help_text = (
+            "DTN Chat — Keybindings & Commands\n"
+            "─────────────────────────────────\n"
+            "\n"
+            "Keybindings:\n"
+            "  Tab         Toggle sidebar focus\n"
+            "  Enter       Select node / send message\n"
+            "  Esc         Return to chat input\n"
+            "  Alt+Up      Previous conversation\n"
+            "  Alt+Down    Next conversation\n"
+            "  Alt+N       Jump to next unread\n"
+            "  PgUp/PgDn   Scroll messages\n"
+            "  F1          This help screen\n"
+            "  F2          Refresh node list\n"
+            "  F10         Quit\n"
+            "\n"
+            "Commands (type in input bar):\n"
+            "  /to <name|IPN>   Switch conversation\n"
+            "  /nodes           Refresh node list\n"
+            "  /help            Show this help\n"
+            "  /quit            Exit chat\n"
+            "\n"
+            "Press any key to dismiss."
+        )
+        help_widget = urwid.Filler(urwid.Text(help_text), valign="middle")
+        help_box = urwid.LineBox(help_widget, title="Help")
+        overlay = urwid.Overlay(
+            help_box, self.frame,
+            align="center", width=("relative", 60),
+            valign="middle", height=("relative", 70),
+        )
+
+        if self.loop is not None:
+            original_widget = self.loop.widget
+            original_handler = self.loop.unhandled_input
+
+            def dismiss(key):
+                self.loop.widget = original_widget
+                self.loop.unhandled_input = original_handler
+
+            self.loop.widget = overlay
+            self.loop.unhandled_input = dismiss
