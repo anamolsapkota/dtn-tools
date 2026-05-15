@@ -738,6 +738,86 @@ STEPS = [
 
 
 # ---------------------------------------------------------------------------
+# Read existing configuration
+# ---------------------------------------------------------------------------
+
+def _read_existing_config(dtn_dir, ipn):
+    """Read config values from existing host.rc, dtnex.conf, discovery.conf."""
+    import re as _re
+    cfg = {}
+
+    # Read from dtnex.conf
+    dtnex_path = os.path.join(dtn_dir, "dtnex.conf")
+    if os.path.exists(dtnex_path):
+        with open(dtnex_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("nodemetadata="):
+                    meta = line.split("=", 1)[1].strip('"').strip("'")
+                    parts = [p.strip() for p in meta.split(",")]
+                    if len(parts) >= 1:
+                        # Name is the first part (before any system stats)
+                        cfg["node_name"] = parts[0].split()[0] if parts[0] else ""
+                    if len(parts) >= 2:
+                        cfg["email"] = parts[1]
+                    if len(parts) >= 3:
+                        cfg["location"] = parts[2]
+                elif line.startswith("gpsLatitude="):
+                    cfg["lat"] = line.split("=", 1)[1]
+                elif line.startswith("gpsLongitude="):
+                    cfg["lon"] = line.split("=", 1)[1]
+
+    # Read from discovery.conf
+    disc_path = os.path.join(dtn_dir, "dtn-discovery", "discovery.conf")
+    if os.path.exists(disc_path):
+        with open(disc_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if k == "gateway_ipn":
+                    cfg["gateway_ipn"] = v
+                elif k == "contact_rate":
+                    cfg["contact_rate"] = v
+                elif k == "contact_duration":
+                    cfg["contact_duration"] = v
+                elif k == "owlt":
+                    cfg["owlt"] = v
+
+    # Read gateway IP from host.rc
+    import glob as _glob
+    for rc_file in _glob.glob(os.path.join(dtn_dir, f"host{ipn}.rc")) or \
+                   _glob.glob(os.path.join(dtn_dir, "host*.rc")):
+        with open(rc_file) as f:
+            for line in f:
+                # Look for gateway outduct: "a outduct udp <IP>:<port> udpclo"
+                m = _re.match(r"\s*a\s+outduct\s+udp\s+(\d+\.\d+\.\d+\.\d+):(\d+)\s+udpclo", line)
+                if m and m.group(1) not in ("127.0.0.1", "0.0.0.0"):
+                    cfg["gateway_ip"] = m.group(1)
+                    cfg["udp_port"] = m.group(2)
+                # Look for induct port
+                m = _re.match(r"\s*a\s+induct\s+udp\s+0\.0\.0\.0:(\d+)", line)
+                if m:
+                    cfg["udp_port"] = m.group(1)
+        break
+
+    return cfg
+
+
+def _find_existing_ipn(home):
+    """Find IPN from existing host*.rc files."""
+    import glob as _glob, re as _re
+    for d in [os.path.join(home, "dtn"), os.path.join(home, "ion-dtn"), "/opt/dtn"]:
+        for f in _glob.glob(os.path.join(d, "host*.rc")):
+            m = _re.search(r"host(\d{6,})\.rc", f)
+            if m:
+                return m.group(1), d
+    return None, None
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -745,21 +825,10 @@ def run_init(args):
     """Run the DTN node setup wizard."""
     auto_yes = getattr(args, "yes", False)
 
-    print("=" * 60)
-    print("  DTN Node Setup Wizard")
-    print("  Sets up a complete DTN node with ION-DTN")
-    print("=" * 60)
-    print()
-
     # Detect system
     os_info = detect_os()
     user = getpass.getuser()
     home = os.path.expanduser("~")
-
-    print(f"  System:   {os_info['distro']} ({os_info['arch']})")
-    print(f"  User:     {user}")
-    print(f"  Home:     {home}")
-    print()
 
     # Check what's already installed
     ion_ok = has_binary("ionadmin")
@@ -769,28 +838,10 @@ def run_init(args):
         out, rc = run_cmd("bpversion 2>/dev/null")
         ion_running = rc == 0 and out != ""
 
-    if ion_ok:
-        print_ok(f"ION-DTN: installed ({shutil.which('ionadmin')})")
-    else:
-        print(f"  ION-DTN: not installed (will build from source)")
-    if dtnex_ok:
-        print_ok(f"dtnex:   installed ({shutil.which('dtnex')})")
-    else:
-        print(f"  dtnex:   not installed (will build from source)")
-    if ion_running:
-        print_ok("ION:     running")
-    print()
+    # Try to detect existing configuration
+    existing_ipn, existing_dtn_dir = _find_existing_ipn(home)
 
-    # Gather configuration
-    cfg = {}
-    cfg["os"] = os_info
-    cfg["user"] = user
-    cfg["home"] = home
-    cfg["auto_yes"] = auto_yes
-    cfg["skip_build"] = getattr(args, "skip_build", False)
-    cfg["skip_services"] = getattr(args, "skip_services", False)
-
-    # IPN number — try to auto-detect from running ION
+    # Also try from running ION
     detected_ipn = None
     if ion_running:
         import tempfile, re
@@ -805,7 +856,135 @@ def run_init(args):
                 detected_ipn = m.group(1)
                 break
 
-    default_ipn = getattr(args, "ipn", None) or detected_ipn
+    best_ipn = getattr(args, "ipn", None) or detected_ipn or existing_ipn
+
+    # --- If node is already configured, show config and ask what to update ---
+    if best_ipn and existing_dtn_dir:
+        existing_cfg = _read_existing_config(existing_dtn_dir, best_ipn)
+        host_rc = os.path.join(existing_dtn_dir, f"host{best_ipn}.rc")
+        dtnex_conf = os.path.join(existing_dtn_dir, "dtnex.conf")
+
+        if os.path.exists(host_rc) and os.path.exists(dtnex_conf):
+            # Node is already set up — show current config
+            print("=" * 60)
+            print("  DTN Node — Already Configured")
+            print("=" * 60)
+            print()
+            print(f"  System:   {os_info['distro']} ({os_info['arch']})")
+            print(f"  User:     {user}")
+            print()
+
+            if ion_ok:
+                print_ok(f"ION-DTN: installed ({shutil.which('ionadmin')})")
+            if dtnex_ok:
+                print_ok(f"dtnex:   installed ({shutil.which('dtnex')})")
+            if ion_running:
+                print_ok("ION:     running")
+            print()
+
+            print("  Current Configuration:")
+            print(f"    IPN:        ipn:{best_ipn}")
+            print(f"    Name:       {existing_cfg.get('node_name', '?')}")
+            print(f"    Email:      {existing_cfg.get('email', '?')}")
+            print(f"    Location:   {existing_cfg.get('location', '?')}")
+            print(f"    Gateway:    ipn:{existing_cfg.get('gateway_ipn', '?')} at {existing_cfg.get('gateway_ip', '?')}")
+            print(f"    DTN Dir:    {existing_dtn_dir}")
+            print(f"    UDP Port:   {existing_cfg.get('udp_port', '?')}")
+            print(f"    host.rc:    {host_rc}")
+            print(f"    dtnex.conf: {dtnex_conf}")
+            print()
+
+            if not confirm("Update configuration?", False, auto_yes):
+                # Just run the steps to ensure everything is running
+                print()
+                print("  Checking services...")
+
+                cfg = {
+                    "os": os_info, "user": user, "home": home,
+                    "auto_yes": auto_yes,
+                    "skip_build": True, "skip_services": False,
+                    "ipn": best_ipn,
+                    "dtn_dir": existing_dtn_dir,
+                    "src_dir": f"{home}/src",
+                    "gateway_ipn": existing_cfg.get("gateway_ipn", GATEWAY_IPN),
+                    "gateway_ip": existing_cfg.get("gateway_ip", GATEWAY_IP),
+                    "udp_port": existing_cfg.get("udp_port", "4556"),
+                    "contact_rate": existing_cfg.get("contact_rate", "100000"),
+                    "contact_duration": existing_cfg.get("contact_duration", "360000000"),
+                    "owlt": existing_cfg.get("owlt", "1"),
+                    "node_name": existing_cfg.get("node_name", f"dtn-node-{best_ipn[-3:]}"),
+                    "email": existing_cfg.get("email", ""),
+                    "location": existing_cfg.get("location", ""),
+                    "lat": existing_cfg.get("lat", "0.0"),
+                    "lon": existing_cfg.get("lon", "0.0"),
+                    "broadcast_ip": "255.255.255.255",
+                }
+
+                # Only run the steps that check/fix runtime state
+                for step in STEPS:
+                    if step.name in ("build-ion", "build-dtnex", "setup-ionwd"):
+                        continue  # skip build steps
+                    try:
+                        if step.check(cfg):
+                            print_ok(step.desc)
+                            continue
+                    except Exception:
+                        pass
+                    print(f"  Setting up: {step.desc}")
+                    try:
+                        step.run(cfg)
+                    except Exception as e:
+                        print_fail(str(e))
+
+                print()
+                print("  Node ready: ipn:" + best_ipn)
+                return
+
+            # User wants to update — fall through to the prompts below
+            # but use existing values as defaults
+            print()
+            print("  Enter new values (press Enter to keep current):")
+            print()
+
+    # --- Full setup wizard (new node or updating config) ---
+    print("=" * 60)
+    print("  DTN Node Setup Wizard")
+    print("  Sets up a complete DTN node with ION-DTN")
+    print("=" * 60)
+    print()
+
+    print(f"  System:   {os_info['distro']} ({os_info['arch']})")
+    print(f"  User:     {user}")
+    print(f"  Home:     {home}")
+    print()
+
+    if ion_ok:
+        print_ok(f"ION-DTN: installed ({shutil.which('ionadmin')})")
+    else:
+        print(f"  ION-DTN: not installed (will build from source)")
+    if dtnex_ok:
+        print_ok(f"dtnex:   installed ({shutil.which('dtnex')})")
+    else:
+        print(f"  dtnex:   not installed (will build from source)")
+    if ion_running:
+        print_ok("ION:     running")
+    print()
+
+    # Use existing values as defaults where available
+    existing_cfg = {}
+    if best_ipn and existing_dtn_dir:
+        existing_cfg = _read_existing_config(existing_dtn_dir, best_ipn)
+
+    # Gather configuration
+    cfg = {}
+    cfg["os"] = os_info
+    cfg["user"] = user
+    cfg["home"] = home
+    cfg["auto_yes"] = auto_yes
+    cfg["skip_build"] = getattr(args, "skip_build", False)
+    cfg["skip_services"] = getattr(args, "skip_services", False)
+
+    default_ipn = getattr(args, "ipn", None) or best_ipn
     cfg["ipn"] = default_ipn or prompt(
         "Your IPN node number (register at openipn.org)", auto_yes=auto_yes
     )
@@ -814,19 +993,29 @@ def run_init(args):
         return
 
     cfg["node_name"] = getattr(args, "name", None) or prompt(
-        "Node name", f"dtn-node-{cfg['ipn'][-3:]}", auto_yes
+        "Node name",
+        existing_cfg.get("node_name", f"dtn-node-{cfg['ipn'][-3:]}"),
+        auto_yes
     )
     cfg["email"] = getattr(args, "email", None) or prompt(
-        "Contact email", f"{user}@example.com", auto_yes
+        "Contact email",
+        existing_cfg.get("email", f"{user}@example.com"),
+        auto_yes
     )
     cfg["location"] = getattr(args, "location", None) or prompt(
-        "Location (city, country)", "", auto_yes
+        "Location (city, country)",
+        existing_cfg.get("location", ""),
+        auto_yes
     )
-    cfg["lat"] = getattr(args, "lat", None) or prompt("GPS latitude", "0.0", auto_yes)
-    cfg["lon"] = getattr(args, "lon", None) or prompt("GPS longitude", "0.0", auto_yes)
+    cfg["lat"] = getattr(args, "lat", None) or prompt(
+        "GPS latitude", existing_cfg.get("lat", "0.0"), auto_yes
+    )
+    cfg["lon"] = getattr(args, "lon", None) or prompt(
+        "GPS longitude", existing_cfg.get("lon", "0.0"), auto_yes
+    )
 
     # Directories
-    default_dtn_dir = getattr(args, "dtn_dir", None)
+    default_dtn_dir = getattr(args, "dtn_dir", None) or existing_dtn_dir
     if not default_dtn_dir:
         for d in [f"{home}/dtn", f"{home}/ion-dtn"]:
             if os.path.isdir(d):
@@ -839,15 +1028,19 @@ def run_init(args):
 
     # Network
     cfg["gateway_ipn"] = getattr(args, "gateway_ipn", None) or prompt(
-        "Gateway IPN", GATEWAY_IPN, auto_yes
+        "Gateway IPN",
+        existing_cfg.get("gateway_ipn", GATEWAY_IPN),
+        auto_yes
     )
     cfg["gateway_ip"] = getattr(args, "gateway_ip", None) or prompt(
-        "Gateway IP (Tailscale/VPN)", GATEWAY_IP, auto_yes
+        "Gateway IP (Tailscale/VPN)",
+        existing_cfg.get("gateway_ip", GATEWAY_IP),
+        auto_yes
     )
-    cfg["udp_port"] = prompt("UDP port", "4556", auto_yes)
-    cfg["contact_rate"] = prompt("Contact rate (bytes/sec)", "100000", auto_yes)
-    cfg["contact_duration"] = prompt("Contact duration (seconds)", "360000000", auto_yes)
-    cfg["owlt"] = prompt("One-way light time (seconds)", "1", auto_yes)
+    cfg["udp_port"] = prompt("UDP port", existing_cfg.get("udp_port", "4556"), auto_yes)
+    cfg["contact_rate"] = prompt("Contact rate (bytes/sec)", existing_cfg.get("contact_rate", "100000"), auto_yes)
+    cfg["contact_duration"] = prompt("Contact duration (seconds)", existing_cfg.get("contact_duration", "360000000"), auto_yes)
+    cfg["owlt"] = prompt("One-way light time (seconds)", existing_cfg.get("owlt", "1"), auto_yes)
     cfg["broadcast_ip"] = prompt("IPND broadcast address", "255.255.255.255", auto_yes)
 
     # Summary
