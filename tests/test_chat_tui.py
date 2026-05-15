@@ -26,3 +26,24 @@ def test_chat_tui_construction():
     )
     assert tui.my_ipn == "268485091"
     assert tui.frame is not None
+
+
+def test_sidebar_population():
+    """Sidebar populates neighbor and known node lists."""
+    from dtn_tools.chat_tui import ChatTUI, SidebarEntry
+    tui = ChatTUI("268485091", "/tmp/test-dtn", "/tmp/test-discovery.json", dry_run=True)
+
+    neighbors = {"268485000": {"name": "DTNGW", "outduct": "100.96.108.37:4556"}}
+    known = {"268485111": {"name": "echo-dhulikhel", "hops": 2}}
+
+    tui._populate_sidebar(neighbors, known)
+
+    assert len(tui.neighbor_walker) == 1
+    assert len(tui.known_walker) == 1
+
+
+def test_sidebar_entry_widget():
+    from dtn_tools.chat_tui import SidebarEntry
+    entry = SidebarEntry("268485000", "DTNGW", unread=3, extra="45ms")
+    canvas = entry.render((30,))
+    assert canvas is not None

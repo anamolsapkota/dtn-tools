@@ -67,6 +67,51 @@ PALETTE = [
 
 
 # ---------------------------------------------------------------------------
+# SidebarEntry — selectable widget for a single node in the sidebar
+# ---------------------------------------------------------------------------
+
+class SidebarEntry(urwid.WidgetWrap):
+    """A selectable sidebar entry showing node name, unread count, and extra info."""
+
+    def __init__(self, ipn: str, name: str, unread: int = 0, extra: str = "",
+                 is_active: bool = False):
+        self.ipn = ipn
+        self.node_name = name
+        self.unread = unread
+        self.extra = extra
+        self.is_active = is_active
+
+        # Build the text markup
+        markup = self._build_markup()
+        self._text = urwid.Text(markup)
+
+        if is_active:
+            widget = urwid.AttrMap(self._text, "active_conv", focus_map="sidebar_focused")
+        else:
+            widget = urwid.AttrMap(self._text, "sidebar_dim", focus_map="sidebar_focused")
+
+        super().__init__(widget)
+
+    def _build_markup(self):
+        """Build urwid text markup with name, unread count, and extra info."""
+        parts = [f" {self.node_name}"]
+        if self.unread > 0:
+            parts = [f" {self.node_name} ", ("unread_count", f"({self.unread})")]
+        if self.extra:
+            if isinstance(parts, list) and len(parts) > 1:
+                parts.append(("msg_ts", f" {self.extra}"))
+            else:
+                parts = [f" {self.node_name} ", ("msg_ts", f"{self.extra}")]
+        return parts
+
+    def selectable(self):
+        return True
+
+    def keypress(self, size, key):
+        return key
+
+
+# ---------------------------------------------------------------------------
 # ChatTUI — full-screen urwid interface
 # ---------------------------------------------------------------------------
 
@@ -133,14 +178,14 @@ class ChatTUI:
         # --- Sidebar: Neighbor list ---
         self.neighbor_walker = urwid.SimpleFocusListWalker([])
         self.neighbor_listbox = urwid.ListBox(self.neighbor_walker)
-        neighbor_header = urwid.AttrMap(
+        self.neighbor_header_widget = urwid.AttrMap(
             urwid.Text(" Neighbors", align="left"), "neighbor_header"
         )
 
         # --- Sidebar: Known nodes list ---
         self.known_walker = urwid.SimpleFocusListWalker([])
         self.known_listbox = urwid.ListBox(self.known_walker)
-        known_header = urwid.AttrMap(
+        self.known_header_widget = urwid.AttrMap(
             urwid.Text(" Known Nodes", align="left"), "known_header"
         )
 
@@ -151,9 +196,9 @@ class ChatTUI:
 
         # --- Sidebar pile ---
         sidebar_pile = urwid.Pile([
-            ("pack", neighbor_header),
+            ("pack", self.neighbor_header_widget),
             ("weight", 1, self.neighbor_listbox),
-            ("pack", known_header),
+            ("pack", self.known_header_widget),
             ("weight", 1, self.known_listbox),
             ("pack", self.net_status),
         ])
@@ -223,9 +268,108 @@ class ChatTUI:
         """Background thread: receive bundles and queue them for the main loop."""
         pass
 
+    def _populate_sidebar(self, neighbors, known):
+        """Populate the neighbor and known node sidebar lists.
+
+        Args:
+            neighbors: {ipn: {"name": str, "outduct": str}} — direct neighbors
+            known: {ipn: {"name": str, "hops": int|str}} — remote nodes
+        """
+        # Clear existing entries
+        self.neighbor_walker[:] = []
+        self.known_walker[:] = []
+
+        # Populate neighbors sorted by name
+        for ipn in sorted(neighbors, key=lambda i: neighbors[i].get("name", i).lower()):
+            info = neighbors[ipn]
+            name = info.get("name", ipn)
+            extra = info.get("outduct", "")
+            is_active = (ipn == self.active_ipn)
+            # Count unread messages for this node
+            unread = self.history.unread_count(ipn) if hasattr(self.history, "unread_count") else 0
+            entry = SidebarEntry(ipn, name, unread=unread, extra=extra,
+                                 is_active=is_active)
+            self.neighbor_walker.append(entry)
+
+        # Populate known nodes sorted by name
+        for ipn in sorted(known, key=lambda i: known[i].get("name", i).lower()):
+            info = known[ipn]
+            name = info.get("name", ipn)
+            hops = info.get("hops", "")
+            extra = f"{hops}h" if hops != "" else ""
+            is_active = (ipn == self.active_ipn)
+            unread = self.history.unread_count(ipn) if hasattr(self.history, "unread_count") else 0
+            entry = SidebarEntry(ipn, name, unread=unread, extra=extra,
+                                 is_active=is_active)
+            self.known_walker.append(entry)
+
+        # Update header text with counts
+        self.neighbor_header_widget.original_widget.set_text(
+            f" Neighbors ({len(neighbors)})"
+        )
+        self.known_header_widget.original_widget.set_text(
+            f" Known Nodes ({len(known)})"
+        )
+
     def _refresh_nodes(self):
-        """Re-fetch the node list and update the sidebar."""
-        pass
+        """Re-fetch the node list from ION and update the sidebar."""
+        if self.dry_run:
+            return
+
+        neighbors = {}
+        known = {}
+        all_nodes = set()
+
+        # --- Get neighbors (nodes with outducts) via ipnadmin l plan ---
+        plan_out, _, plan_rc = _run_admin("ipnadmin", "l plan\nq\n")
+        self.plans = {}
+        if plan_rc == 0 and plan_out:
+            # Format: ": 268485000 xmit 100.96.108.37:4556 xmit rate: 0"
+            for line in plan_out.splitlines():
+                m = re.search(r":\s*(\d+)\s+xmit\s+(\S+)", line)
+                if m:
+                    ipn = m.group(1)
+                    outduct = m.group(2)
+                    if ipn != self.my_ipn:
+                        self.plans[ipn] = outduct
+                        name = self.node_names.get(ipn, f"node-{ipn}")
+                        neighbors[ipn] = {"name": name, "outduct": outduct}
+
+        # --- Get all contact graph nodes via ionadmin l contact ---
+        contact_out, _, contact_rc = _run_admin("ionadmin", "l contact\nq\n")
+        if contact_rc == 0 and contact_out:
+            # Format: "From ... node 268485091 to node 268485000 ..."
+            for line in contact_out.splitlines():
+                for m in re.finditer(r"node\s+(\d+)", line):
+                    all_nodes.add(m.group(1))
+
+        # Compute known = all - neighbors - self
+        known_ipns = all_nodes - set(neighbors.keys()) - {self.my_ipn}
+        for ipn in known_ipns:
+            name = self.node_names.get(ipn, f"node-{ipn}")
+            known[ipn] = {"name": name, "hops": "?"}
+
+        # Store sorted node list
+        self.node_list = sorted(
+            list(neighbors.keys()) + list(known_ipns),
+            key=lambda i: self.node_names.get(i, i).lower()
+        )
+
+        # Update the sidebar
+        self._populate_sidebar(neighbors, known)
+
+        # Update network status
+        node_count = len(neighbors) + len(known)
+        status_text = f" NET: {len(neighbors)}N {len(known)}K"
+
+        # Check ION status
+        ion_out, _, ion_rc = _run("ionadmin l", timeout=5)
+        if ion_rc == 0:
+            self.net_status.original_widget.set_text(status_text)
+            self.net_status.set_attr_map({None: "net_ok"})
+        else:
+            self.net_status.original_widget.set_text(" NET: ION down")
+            self.net_status.set_attr_map({None: "net_down"})
 
     def _switch_to(self, ipn: str):
         """Switch the active conversation to the given IPN."""
