@@ -12,6 +12,7 @@ import re
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 
 import urwid
 
@@ -139,6 +140,7 @@ class ChatTUI:
 
         # Active conversation
         self.active_ipn = None
+        self._last_date = None
 
         # Receiver thread wakeup pipe
         self._pipe_r, self._pipe_w = os.pipe()
@@ -251,6 +253,62 @@ class ChatTUI:
         # Register the pipe fd so the receiver thread can wake the loop
         self.loop.watch_pipe(self._on_pipe_data)
         self.loop.run()
+
+    # ------------------------------------------------------------------
+    # Message pane
+    # ------------------------------------------------------------------
+
+    def _append_message(self, msg):
+        """Render a message dict as urwid Text widget and append to msg_walker.
+
+        Inserts a date separator when the date changes between messages.
+        """
+        ts_str = msg.get("ts", "")
+        try:
+            dt = datetime.fromisoformat(ts_str)
+        except (ValueError, TypeError):
+            dt = datetime.now(timezone.utc)
+
+        date_text = dt.strftime("%Y-%m-%d")
+        if date_text != self._last_date:
+            sep = urwid.Text(("date_sep", f"  — {date_text} —"), align="center")
+            sep._is_date_sep = True
+            self.msg_walker.append(sep)
+            self._last_date = date_text
+
+        time_text = dt.strftime("%H:%M")
+        direction = msg.get("dir", "in")
+        msg_text = msg.get("msg", "")
+
+        if direction == "out":
+            name_attr = "msg_you"
+            name_text = "you"
+        else:
+            name_attr = "msg_them"
+            name_text = msg.get("name") or msg.get("from", "?")
+
+        widget = urwid.Text([
+            ("msg_ts", f"  {time_text} "),
+            (name_attr, name_text),
+            ("default", f": {msg_text}"),
+        ])
+        self.msg_walker.append(widget)
+
+    def _load_conversation(self, ipn):
+        """Clear the message pane and load the last 50 messages for the given IPN."""
+        self.msg_walker[:] = []
+        self._last_date = None
+
+        messages = self.history.get_recent(ipn, 50)
+        for msg in messages:
+            self._append_message(msg)
+
+        self._scroll_to_bottom()
+
+    def _scroll_to_bottom(self):
+        """Scroll the message listbox to the last item."""
+        if len(self.msg_walker) > 0:
+            self.msg_listbox.set_focus(len(self.msg_walker) - 1)
 
     # ------------------------------------------------------------------
     # Placeholder methods — filled in by later tasks
