@@ -9,7 +9,9 @@ persistent message storage.
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -248,7 +250,16 @@ class ChatTUI:
     # ------------------------------------------------------------------
 
     def run(self):
-        """Start the urwid main loop."""
+        """Start the urwid main loop with receiver thread."""
+        self.running = True
+
+        # Register the bprecvfile endpoint
+        if not self.dry_run:
+            _run_admin("bpadmin", f"a endpoint {self.recv_eid} q\nq\n")
+
+        # Create temp directory for received bundles
+        self.recv_dir = tempfile.mkdtemp(prefix="dtn-chat-")
+
         self.loop = urwid.MainLoop(
             self.frame,
             palette=PALETTE,
@@ -257,7 +268,26 @@ class ChatTUI:
         )
         # Register the pipe fd so the receiver thread can wake the loop
         self.loop.watch_pipe(self._on_pipe_data)
-        self.loop.run()
+
+        # Start the receiver thread
+        recv_thread = threading.Thread(target=self._receiver_loop, daemon=True)
+        recv_thread.start()
+
+        # Populate sidebar
+        self._refresh_nodes()
+
+        # Resume last conversation if available
+        last = self.history.get_last_active()
+        if last:
+            self._switch_to(last)
+
+        try:
+            self.loop.run()
+        finally:
+            self.running = False
+            if self.active_ipn:
+                self.history.set_last_active(self.active_ipn)
+            shutil.rmtree(self.recv_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------
     # Message pane
@@ -377,11 +407,101 @@ class ChatTUI:
 
     def _on_pipe_data(self, data):
         """Called by urwid main loop when the receiver thread writes to the pipe."""
-        pass
+        with self._pending_lock:
+            pending = list(self._pending_messages)
+            self._pending_messages.clear()
+
+        for sender_ipn, sender_name, msg_data in pending:
+            if sender_ipn == self.active_ipn:
+                self.history.add_incoming(sender_ipn, sender_name,
+                                          msg_data["msg"], read=True)
+                self._append_message(msg_data)
+                self._scroll_to_bottom()
+            else:
+                self.history.add_incoming(sender_ipn, sender_name,
+                                          msg_data["msg"], read=False)
+                label = sender_name or f"ipn:{sender_ipn}"
+                unread = self.history.unread_count(sender_ipn)
+                self._set_status(f"New message from {label} ({unread} unread)")
+
+        if not self.dry_run:
+            self._refresh_nodes()
+
+        return True
 
     def _receiver_loop(self):
         """Background thread: receive bundles and queue them for the main loop."""
-        pass
+        proc = subprocess.Popen(
+            ["bprecvfile", self.recv_eid],
+            cwd=self.recv_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            while self.running:
+                time.sleep(0.5)
+
+                # Restart bprecvfile if it died
+                if proc.poll() is not None and self.running:
+                    proc = subprocess.Popen(
+                        ["bprecvfile", self.recv_eid],
+                        cwd=self.recv_dir,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+
+                # Scan recv_dir for incoming bundle files
+                try:
+                    for fname in sorted(os.listdir(self.recv_dir)):
+                        fpath = os.path.join(self.recv_dir, fname)
+                        if not os.path.isfile(fpath):
+                            continue
+                        try:
+                            with open(fpath) as f:
+                                content = f.read().strip()
+                            os.unlink(fpath)
+                            if not content:
+                                continue
+                        except Exception:
+                            continue
+
+                        # Parse content as JSON
+                        try:
+                            data = json.loads(content)
+                            sender_ipn = str(data.get("from", "unknown"))
+                            sender_name = data.get("name", "")
+                            msg = data.get("msg", content)
+                        except (json.JSONDecodeError, ValueError):
+                            sender_ipn = "unknown"
+                            sender_name = ""
+                            msg = content
+
+                        # Update node name cache
+                        if sender_name and sender_ipn != "unknown":
+                            self.node_names[sender_ipn] = sender_name
+
+                        # Build message data
+                        msg_data = {
+                            "dir": "in",
+                            "from": sender_ipn,
+                            "name": sender_name,
+                            "msg": msg,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "read": sender_ipn == self.active_ipn,
+                        }
+
+                        # Queue for the main loop
+                        with self._pending_lock:
+                            self._pending_messages.append(
+                                (sender_ipn, sender_name, msg_data)
+                            )
+
+                        # Wake urwid main loop
+                        os.write(self._pipe_w, b"1")
+                except Exception:
+                    pass
+        finally:
+            proc.terminate()
 
     def _populate_sidebar(self, neighbors, known):
         """Populate the neighbor and known node sidebar lists.
