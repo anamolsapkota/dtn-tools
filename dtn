@@ -635,6 +635,25 @@ def cmd_sensor(args):
         print(f"Failed: {err}")
 
 
+def cmd_install(args):
+    """Install a DTN package/module."""
+    mod = _import_module("packages", "packages.py")
+    if not hasattr(args, "package") or not args.package:
+        mod.list_packages(DTN_DIR)
+        return
+    detect_ipn()
+    mod.install_package(args.package, DTN_DIR, MY_IPN, SCRIPT_DIR)
+
+
+def cmd_uninstall(args):
+    """Uninstall a DTN package/module."""
+    mod = _import_module("packages", "packages.py")
+    if not hasattr(args, "package") or not args.package:
+        mod.list_packages(DTN_DIR)
+        return
+    mod.uninstall_package(args.package, DTN_DIR)
+
+
 def cmd_chat(args):
     """Interactive terminal chat over DTN bundles."""
     detect_ipn()
@@ -1210,6 +1229,14 @@ def main():
     # config
     sub.add_parser("config", help="Show node configuration")
 
+    # install
+    inst = sub.add_parser("install", help="Install a DTN package (dtn-chat, metadata-updater)")
+    inst.add_argument("package", nargs="?", help="Package name (or omit to list available)")
+
+    # uninstall
+    uninst = sub.add_parser("uninstall", help="Uninstall a DTN package")
+    uninst.add_argument("package", nargs="?", help="Package name")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1240,6 +1267,8 @@ def main():
         "disable": cmd_disable,
         "logs": cmd_logs,
         "config": cmd_config,
+        "install": cmd_install,
+        "uninstall": cmd_uninstall,
     }
 
     func = commands.get(args.command)
