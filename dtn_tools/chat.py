@@ -326,6 +326,18 @@ class ChatSession:
             if m and m.group(1) != self.my_ipn:
                 self.plans.add(m.group(1))
 
+        # Also include discovered nodes from discovery DB
+        if os.path.exists(self.discovery_db):
+            try:
+                with open(self.discovery_db) as f:
+                    for ipn, info in json.load(f).get("nodes", {}).items():
+                        if ipn != self.my_ipn:
+                            all_ipns.add(ipn)
+                            if info.get("name") and ipn not in self.node_names:
+                                self.node_names[ipn] = info["name"]
+            except Exception:
+                pass
+
         self.node_list = sorted(all_ipns, key=lambda x: int(x))
         return self.node_list
 

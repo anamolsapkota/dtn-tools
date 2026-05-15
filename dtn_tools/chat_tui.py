@@ -653,6 +653,19 @@ class ChatTUI:
                 for m in re.finditer(r"node\s+(\d+)", line):
                     all_nodes.add(m.group(1))
 
+        # --- Also include discovered nodes from discovery DB ---
+        if os.path.exists(self.discovery_db):
+            try:
+                with open(self.discovery_db) as f:
+                    disc_data = json.load(f).get("nodes", {})
+                for ipn, info in disc_data.items():
+                    if ipn != self.my_ipn:
+                        all_nodes.add(ipn)
+                        if info.get("name") and ipn not in self.node_names:
+                            self.node_names[ipn] = info["name"]
+            except Exception:
+                pass
+
         # Compute known = all - neighbors - self
         known_ipns = all_nodes - set(neighbors.keys()) - {self.my_ipn}
         for ipn in known_ipns:
