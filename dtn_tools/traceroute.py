@@ -522,9 +522,9 @@ def diagnose_all():
 
     print()
     if issues_found == 0:
-        print(f"All {len(plans) - 1} direct neighbor(s) OK.")
+        print(f"All {max(0, len(plans) - 1)} direct neighbor(s) OK.")
     else:
-        print(f"{issues_found} of {len(plans) - 1} neighbor(s) with issues.")
+        print(f"{issues_found} of {max(0, len(plans) - 1)} neighbor(s) with issues.")
 
     # All nodes in contact graph (not just plans)
     remote_nodes = all_nodes - set(plans.keys())
@@ -562,9 +562,10 @@ def diagnose_all():
     # Grand total
     print()
     total_nodes = len(all_nodes)
-    total_routable = (len(plans) - 1) + (routable if remote_nodes else 0)
+    total_routable = max(0, len(plans) - 1) + (routable if remote_nodes else 0)
+    total_unreachable = max(0, total_nodes - total_routable)
     print(f"Total: {total_nodes} nodes known, {total_routable} routable, "
-          f"{total_nodes - total_routable} unreachable.")
+          f"{total_unreachable} unreachable.")
 
 
 if __name__ == "__main__":
