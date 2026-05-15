@@ -404,8 +404,8 @@ def run_start_ion(cfg):
 def check_services_installed(cfg):
     services = ["ionwd", "dtnex", "bpecho", "dtn-discovery"]
     for svc in services:
-        _, rc = run_cmd(f"systemctl is-enabled {svc} 2>/dev/null")
-        if rc != 0:
+        svc_path = Path(f"/etc/systemd/system/{svc}.service")
+        if not svc_path.exists():
             return False
     return True
 
@@ -677,7 +677,7 @@ After=ionwd.service
 Type=simple
 User={user}
 ExecStartPre=/bin/sleep 10
-ExecStart=/bin/bash -c '/usr/local/bin/bpecho ipn:{ipn}.2 & /usr/local/bin/bpecho ipn:{ipn}.12161 & wait'
+ExecStart=/bin/bash -c '/usr/local/bin/bpecho ipn:{ipn}.12161 & exec /usr/local/bin/bpecho ipn:{ipn}.2'
 Restart=always
 RestartSec=10
 Environment=PATH=/usr/local/bin:/usr/bin:/bin

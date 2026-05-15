@@ -463,7 +463,7 @@ def diagnose_all():
     print(f"  discovery: {'Running (pid ' + out.split()[0] + ')' if out else 'NOT RUNNING'}")
 
     print()
-    print(f"  Plans (direct neighbors): {len(plans) - 1}")  # minus loopback
+    print(f"  Plans (direct neighbors): {max(0, len(plans) - 1)}")  # minus loopback
     print(f"  Contacts (edges):         {len(contacts)}")
     print(f"  Ranges:                   {len(ranges)}")
     print(f"  Unique nodes in graph:    {len(all_nodes)}")

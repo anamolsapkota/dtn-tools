@@ -61,7 +61,7 @@ MY_IPN = None  # detected at startup
 HOST_RC = None
 NEIGHBOURS_FILE = os.path.join(DTN_DIR, "scripts", "neighbours.conf")
 DISCOVERY_DB = os.path.join(DTN_DIR, "dtn-discovery", "discovered_nodes.json")
-DISCOVERY_SCRIPT = os.path.join(DTN_DIR, "dtn-discovery", "dtn-nodes")
+DISCOVERY_SCRIPT = os.path.join(DTN_DIR, "dtn-discovery", "discovery.py")
 ADD_NEIGHBOUR_SCRIPT = os.path.join(DTN_DIR, "scripts", "add-neighbour.sh")
 
 
@@ -160,24 +160,27 @@ def cmd_status(_args):
     print(f"Host RC:  {HOST_RC}")
     print()
 
-    # ION version — bpversion returns rc=7 on success (outputs "bpv7"), so don't use ||
-    out, _, _ = run("bpversion 2>/dev/null")
-    if out and out.strip():
-        print(f"ION Version: {out}")
+    # ION version and status
+    ver_out, _, _ = run("bpversion 2>/dev/null")
+    ion_out, _, ion_rc = run_admin("ionadmin", "l\nq")
+    ion_running = ion_rc == 0 and bool(ion_out)
+
+    if ver_out and ver_out.strip():
+        print(f"ION Version: {ver_out}")
+    elif ion_running:
+        print("ION Version: (bpversion not in PATH)")
     else:
         print("ION not installed or not in PATH")
 
-    # ION status
-    out, _, rc = run_admin("ionadmin", "l\nq")
-    if rc == 0 and out:
-        print(f"ION Status: Running")
+    if ion_running:
+        print("ION Status: Running")
     else:
-        print(f"ION Status: NOT RUNNING")
+        print("ION Status: NOT RUNNING")
 
     print()
 
     # Service status — check systemd first, fall back to process detection
-    services = ["ionwd", "dtnex", "bpecho", "dtn-chat", "dtn-discovery", "dtn-metadata-updater"]
+    services = DTN_SERVICES + DTN_OPTIONAL_SERVICES
     print(f"{'Service':<25} {'Status':<12} {'PID'}")
     print("-" * 55)
     for svc in services:
@@ -201,14 +204,25 @@ def cmd_status(_args):
 
     print()
 
-    # Bundle stats
+    # Bundle stats (only if BP is initialized)
     out, _, _ = run_admin("bpadmin", "w\nq")
     if out:
-        print("Bundle Protocol Stats:")
+        # Filter out SDR/initialization errors
+        error_markers = ["Can't open", "not initialized", "can't attach", "Malformed"]
+        stats_lines = []
         for line in out.splitlines():
             line = line.strip()
-            if line and not line.startswith(":"):
+            if not line or line.startswith(":"):
+                continue
+            if any(marker.lower() in line.lower() for marker in error_markers):
+                continue
+            stats_lines.append(line)
+        if stats_lines:
+            print("Bundle Protocol Stats:")
+            for line in stats_lines:
                 print(f"  {line}")
+        elif not ion_running:
+            print("Bundle Protocol: not initialized")
 
 
 def cmd_neighbors(args):
@@ -288,10 +302,10 @@ q
     ipn_cmds = f"a plan {ipn} udp/{ip}:{port}\nq\n"
     run_admin("ipnadmin", ipn_cmds)
 
-    # Update neighbours.conf
-    if os.path.exists(NEIGHBOURS_FILE):
-        with open(NEIGHBOURS_FILE, "a") as f:
-            f.write(f"node-{ipn} {ipn} {ip}\n")
+    # Update neighbours.conf (create if needed)
+    os.makedirs(os.path.dirname(NEIGHBOURS_FILE), exist_ok=True)
+    with open(NEIGHBOURS_FILE, "a") as f:
+        f.write(f"node-{ipn} {ipn} {ip}\n")
 
     # Persist to host*.rc
     _persist_add_to_hostrc(ipn, ip, port, rate, duration)
@@ -317,6 +331,7 @@ def _persist_add_to_hostrc(ipn, ip, port, rate, duration):
     """Add a neighbor to the host*.rc file for persistence across restarts."""
     hostrc = _find_hostrc()
     if not hostrc:
+        print("  WARNING: Could not find host*.rc file to persist neighbor")
         return
 
     content = Path(hostrc).read_text()
@@ -325,6 +340,8 @@ def _persist_add_to_hostrc(ipn, ip, port, rate, duration):
     if f"{MY_IPN} {ipn} {rate}" in content and f"a plan {ipn}" in content:
         return
 
+    updated = False
+
     # Add contacts/ranges before "## end ionadmin"
     ion_block = f"""
 # Neighbor ipn:{ipn}
@@ -332,18 +349,31 @@ a contact +1 +{duration} {MY_IPN} {ipn} {rate}
 a contact +1 +{duration} {ipn} {MY_IPN} {rate}
 a range +1 +{duration} {MY_IPN} {ipn} 1
 a range +1 +{duration} {ipn} {MY_IPN} 1"""
-    content = content.replace("## end ionadmin", ion_block + "\n## end ionadmin")
+    if "## end ionadmin" in content:
+        content = content.replace("## end ionadmin", ion_block + "\n## end ionadmin")
+        updated = True
+    else:
+        print("  WARNING: Missing '## end ionadmin' marker in host.rc — contacts not persisted")
 
     # Add outduct before "## end bpadmin"
     bp_block = f"\na outduct udp {ip}:{port} udpclo"
-    content = content.replace("## end bpadmin", bp_block + "\n## end bpadmin")
+    if "## end bpadmin" in content:
+        content = content.replace("## end bpadmin", bp_block + "\n## end bpadmin")
+        updated = True
+    else:
+        print("  WARNING: Missing '## end bpadmin' marker in host.rc — outduct not persisted")
 
     # Add plan before "## end ipnadmin"
     ipn_block = f"\na plan {ipn} udp/{ip}:{port}"
-    content = content.replace("## end ipnadmin", ipn_block + "\n## end ipnadmin")
+    if "## end ipnadmin" in content:
+        content = content.replace("## end ipnadmin", ipn_block + "\n## end ipnadmin")
+        updated = True
+    else:
+        print("  WARNING: Missing '## end ipnadmin' marker in host.rc — plan not persisted")
 
-    Path(hostrc).write_text(content)
-    print(f"  Updated {hostrc}")
+    if updated:
+        Path(hostrc).write_text(content)
+        print(f"  Updated {hostrc}")
 
 
 def _persist_remove_from_hostrc(ipn):
@@ -479,8 +509,8 @@ def ping_neighbors(target_ipn=None):
 def cmd_discover(args):
     """Query discovered nodes."""
     if not os.path.exists(DISCOVERY_SCRIPT):
-        print(f"Discovery tool not found: {DISCOVERY_SCRIPT}")
-        print("Install dtn-discovery first.")
+        print(f"Discovery script not found: {DISCOVERY_SCRIPT}")
+        print("Run 'dtn init' to set up discovery, or check your DTN_DIR.")
         sys.exit(1)
 
     if args.subaction == "summary":
@@ -649,9 +679,11 @@ def cmd_nodes(_args):
     out, _, _ = run_admin("ionadmin", "l contact\nq")
     if not out:
         print("No contacts (is ION running?)")
+        print(f"  Local node: ipn:{MY_IPN}")
         return
 
-    nodes = set()
+    # Always include our own node
+    nodes = {MY_IPN}
     for line in out.splitlines():
         m = re.search(r"node\s+(\d+)\s+to\s+node\s+(\d+)", line)
         if m:
@@ -711,7 +743,10 @@ def cmd_plans(_args):
     list_neighbors()
 
 
-DTN_SERVICES = ["ionwd", "dtnex", "bpecho", "dtn-chat", "dtn-discovery", "dtn-metadata-updater"]
+DTN_SERVICES = ["ionwd", "dtnex", "bpecho", "dtn-discovery"]
+
+# Optional services — only shown/started if installed
+DTN_OPTIONAL_SERVICES = ["dtn-chat", "dtn-metadata-updater"]
 
 SERVICE_ALIASES = {
     "chat": "dtn-chat",
@@ -821,8 +856,18 @@ def _stop_service(svc):
 
 
 def _stop_services(services=None):
-    """Stop services."""
-    svcs = services or ["dtn-discovery", "dtn-metadata-updater", "dtn-chat", "dtnex", "bpecho"]
+    """Stop services (reverse order for clean shutdown)."""
+    if services:
+        svcs = services
+    else:
+        svcs = list(reversed(DTN_SERVICES))
+        # Also stop optional services if they're running
+        for svc in DTN_OPTIONAL_SERVICES:
+            pattern = _get_proc_pattern(svc)
+            if pattern:
+                _, _, rc = run(f"pgrep -f '{pattern}' >/dev/null 2>&1")
+                if rc == 0:
+                    svcs.insert(0, svc)
     for svc in svcs:
         _stop_service(svc)
 
